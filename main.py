@@ -1,10 +1,25 @@
 import os
+import structlog
+import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
+
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer(),
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+    context_class=dict,
+    logger_factory=structlog.PrintLoggerFactory(),
+)
+
+log = structlog.get_logger()
 
 app = FastAPI()
 client = AsyncOpenAI(
@@ -16,7 +31,7 @@ TASK = "I want to learn about linked lists, for the purpose of being able to sol
 
 input = f"""
         {TASK}. Respond with a step by step plan, link to youtube video to watch then questions/tasks to answer/complete. 
-        The questions should pogressively icrease in difficulty. 4 questions
+        The questions should pogressively increase in difficulty. 2 questions
         """
 
 
@@ -28,6 +43,8 @@ async def list_models():
 
 @app.get("/")
 async def root():
+    log.info("request_started", path="/", model="grok-4.7")
+
     if not os.getenv("GROK_API_KEY"):
         raise HTTPException(
             status_code=500, detail="XAI_API_KEY environment variable is missing."
@@ -44,6 +61,8 @@ async def stream_grok_response(messages: list[dict]):
     """
     yielding text chunks from grok as they arrive
     """
+    log.info("stream_started", model="grok-4.7", message_count=len(messages))
+
     try:
         # requesting streaming response from xAI endpoint
         stream = await client.chat.completions.create(
@@ -55,5 +74,8 @@ async def stream_grok_response(messages: list[dict]):
             if content:
                 yield content
 
+        log.info("stream_completed", model="grok-4.7")
+
     except Exception as e:
+        log.error("stream_failed", error=str(e), model="grok-4.7")
         yield f"\n[API Error: {str(e)}]"

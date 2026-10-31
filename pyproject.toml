@@ -8,5 +8,6 @@ dependencies = [
     "fastapi[standard]>=0.162.0",
     "openai>=3.42.0",
     "python-dotenv>=1.2.4",
+    "structlog>=26.1.0",
     "uvicorn>=0.54.0",
 ]
