@@ -1,9 +1,11 @@
 import os
 import structlog
 import logging
+import random
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI, APITimeoutError, APIConnectionError
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, APIStatusError
 from dotenv import load_dotenv
 import httpx
 
@@ -68,33 +70,69 @@ async def stream_grok_response(messages: list[dict]):
     """
     log.info("stream_started", model="grok-4-1-fast", message_count=len(messages))
 
-    try:
-        yield "Generating finance research report... \n\n"
+    max_retries = 3
 
-        # requesting streaming response from xAI endpoint
-        stream = await client.chat.completions.create(
-            model="grok-4-1-fast", messages=messages, stream=True
-        )
+    for attempt in range(max_retries + 1):
 
-        first_chunk = True
-        async for chunk in stream:
-            content = chunk.choices[0].delta.content
-            if content:
-                if first_chunk:
-                    log.info("first_chunk_recieved", model="grok-4-1-fast")
-                    first_chunk = False
-                yield content
+        try:
+            yield "Generating finance research report... \n\n"
 
-        log.info("stream_completed", model="grok-4-1-fast")
+            # requesting streaming response from xAI endpoint
+            stream = await client.chat.completions.create(
+                model="grok-4-1-fast", messages=messages, stream=True
+            )
 
-    except APITimeoutError:
-        log.warning("stream_timeout", model="grok-4-1-fast")
-        yield "\n[Request timed out. Please try again.]"
+            first_chunk = True
+            async for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    if first_chunk:
+                        log.info("first_chunk_recieved", model="grok-4-1-fast")
+                        first_chunk = False
+                    yield content
 
-    except APIConnectionError as e:
-        log.warning("stream_connection_error", error=str(e), model="grok-4-1-fast")
-        yield "\n[Connection error. Please try again.]"
+            log.info("stream_completed", model="grok-4-1-fast")
 
-    except Exception as e:
-        log.error("stream_failed", error=str(e), model="grok-4-1-fast")
-        yield f"\n[An error occured. Please try again.]"
+            return  # exiting retry loop
+
+        except APIStatusError as e:
+            if e.status_code == 429:
+                if attempt == max_retries:
+                    log.warning("rate_limit_exhausred", attempts=attempt + 1)
+
+                    yield "\n\n[Too many requests. Please try again in a minute.]"
+                    return
+
+                # adhere to retry after if server sent it
+                retry_after = e.response.headers.get("Retry-After")
+                if retry_after:
+                    wait = float(retry_after)
+                else:
+                    # fallback: exceptional backoff + jitter
+                    wait = min(2**attempt + random.uniform(0, 1), 30)
+
+                log.warning(
+                    "rate_limited",
+                    attempt=attempt + 1,
+                    wait_seconds=wait,
+                    model="grok-4-1-fast",
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            ## no retry for any other status error
+            log.error("stream_api_error", status=e.status_code, error=str(e))
+            yield "\n\n[An error occured. Please try again.]"
+            return
+
+        except APITimeoutError:
+            log.warning("stream_timeout", model="grok-4-1-fast")
+            yield "\n\n[Request timed out. Please try again.]"
+
+        except APIConnectionError as e:
+            log.warning("stream_connection_error", error=str(e), model="grok-4-1-fast")
+            yield "\n\n[Connection error. Please try again.]"
+
+        except Exception as e:
+            log.error("stream_failed", error=str(e), model="grok-4-1-fast")
+            yield f"\n\n[An error occured. Please try again.]"
