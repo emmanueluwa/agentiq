@@ -1,9 +1,9 @@
 import os
 import structlog
 import logging
-from fastapi import FastAPI, HTTPException, APITimeoutError, APIExceptionError
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError
 from dotenv import load_dotenv
 import httpx
 
@@ -31,12 +31,12 @@ client = AsyncOpenAI(
     max_retries=1,  # streaming so avoid duplpicating partial output
 )
 
-TASK = "I want to learn about about robotics"
+TASK = "finance investment research"
 
-input_prompt = f"""
-        {TASK}. Respond with a step by step plan, link to youtube video to watch then questions/tasks to answer/complete. 
-        The questions should pogressively increase in difficulty. 2 questions
-        """
+input_prompt = """
+You are a practical finance research assistant.
+Rank the top 4 investment options right now and for each give one article link and one YouTube video link.
+"""
 
 
 @app.get("/models")
@@ -47,7 +47,7 @@ async def list_models():
 
 @app.get("/")
 async def root():
-    log.info("request_started", path="/", model="grok-4.7")
+    log.info("request_started", path="/", model="grok-4-1-fast")
 
     if not os.getenv("GROK_API_KEY"):
         log.error("missing_api_key")
@@ -66,29 +66,35 @@ async def stream_grok_response(messages: list[dict]):
     """
     yielding text chunks from Grok as they arrive
     """
-    log.info("stream_started", model="grok-4.7", message_count=len(messages))
+    log.info("stream_started", model="grok-4-1-fast", message_count=len(messages))
 
     try:
+        yield "Generating finance research report... \n\n"
+
         # requesting streaming response from xAI endpoint
         stream = await client.chat.completions.create(
-            model="grok-4.7", messages=messages, stream=True
+            model="grok-4-1-fast", messages=messages, stream=True
         )
 
+        first_chunk = True
         async for chunk in stream:
             content = chunk.choices[0].delta.content
             if content:
+                if first_chunk:
+                    log.info("first_chunk_recieved", model="grok-4-1-fast")
+                    first_chunk = False
                 yield content
 
-        log.info("stream_completed", model="grok-4.7")
+        log.info("stream_completed", model="grok-4-1-fast")
 
     except APITimeoutError:
-        log.warning("stream_timeout", model="grok-4.7")
+        log.warning("stream_timeout", model="grok-4-1-fast")
         yield "\n[Request timed out. Please try again.]"
 
-    except APIExceptionError as e:
-        log.warning("stream_connection_error", error=str(e), model="grok-4.7")
+    except APIConnectionError as e:
+        log.warning("stream_connection_error", error=str(e), model="grok-4-1-fast")
         yield "\n[Connection error. Please try again.]"
 
     except Exception as e:
-        log.error("stream_failed", error=str(e), model="grok-4.7")
+        log.error("stream_failed", error=str(e), model="grok-4-1-fast")
         yield f"\n[An error occured. Please try again.]"
