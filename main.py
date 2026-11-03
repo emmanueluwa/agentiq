@@ -3,13 +3,16 @@ import structlog
 import logging
 import random
 import asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, APIStatusError
 from dotenv import load_dotenv
 import httpx
 
 load_dotenv()
+
 
 structlog.configure(
     processors=[
@@ -25,6 +28,13 @@ structlog.configure(
 log = structlog.get_logger()
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 client = AsyncOpenAI(
     api_key=os.getenv("GROK_API_KEY"),
@@ -33,22 +43,42 @@ client = AsyncOpenAI(
     max_retries=1,  # streaming so avoid duplpicating partial output
 )
 
-TASK = "finance investment research"
 
-input_prompt = """
-You are a practical finance research assistant.
-Rank the top 4 investment options right now and for each give one article link and one YouTube video link.
+class QueryRequest(BaseModel):
+    query: str = Field(..., min_length=3, max_length=2000)
+
+
+SYSTEM_PROMPT = """You are an exceptionally knowledgeable mentor with deep expertise across domains. You operate at the level of the top 1% of practitioners in whatever field the user is asking about.
+
+Your job is to give clear, rigorous, and practical guidance.
+
+Rules you must follow:
+- Be precise and evidence-based. State assumptions explicitly.
+- Structure your response with clear headings.
+- Always include: key trade-offs or risks, realistic timelines or effort estimates where relevant, and a short summary of recommended next steps.
+- Prefer concrete examples, numbers, ranges, and specific techniques over vague advice.
+- If the query is vague, make reasonable assumptions and state them.
+- Adapt your depth and terminology to the user’s apparent level, but never dumb things down unnecessarily.
+- Prefer clarity and usefulness over length.
+- Always recommend high-quality resources (courses, books, blogs, YouTube channels/videos, official docs, or communities) that are relevant to the topic. Prefer well-known, respected sources.
 """
 
 
-@app.get("/models")
-async def list_models():
-    models = await client.models.list()
-    return [m.id for m in models.data]
+def build_messages(user_query: str) -> list[dict]:
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": f"""Question:
+{user_query}
+
+Provide a structured, high-quality response that someone aiming for top-tier performance could act on. Include realistic options, trade-offs, next steps, and specific recommended resources (courses, blogs, YouTube videos, books, or official documentation).""",
+        },
+    ]
 
 
-@app.get("/")
-async def root():
+@app.post("/")
+async def root(request: Request, body: QueryRequest):
     log.info("request_started", path="/", model="grok-4-1-fast")
 
     if not os.getenv("GROK_API_KEY"):
@@ -57,7 +87,7 @@ async def root():
             status_code=500, detail="XAI_API_KEY environment variable is missing."
         )
 
-    formatted_messages = [{"role": "system", "content": input_prompt}]
+    formatted_messages = build_messages(body.query)
 
     return StreamingResponse(
         stream_grok_response(formatted_messages), media_type="text/plain"
@@ -98,7 +128,7 @@ async def stream_grok_response(messages: list[dict]):
         except APIStatusError as e:
             if e.status_code == 429:
                 if attempt == max_retries:
-                    log.warning("rate_limit_exhausred", attempts=attempt + 1)
+                    log.warning("rate_limit_exhausted", attempts=attempt + 1)
 
                     yield "\n\n[Too many requests. Please try again in a minute.]"
                     return
