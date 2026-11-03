@@ -3,6 +3,8 @@ import structlog
 import logging
 import random
 import asyncio
+import uuid
+from collections.abc import AsyncGenerator
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -36,10 +38,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+MODEL = "grok-4-1-fast"
+MAX_COMPLETION_TOKENS = 4096
+MAX_RETRIES = 3
+
 client = AsyncOpenAI(
     api_key=os.getenv("GROK_API_KEY"),
     base_url="https://api.x.ai/v1",
-    timeout=httpx.Timeout(180.0, connect=10.0, write=30.0, pool=30.0),
+    timeout=httpx.Timeout(read=180.0, connect=10.0, write=30.0, pool=30.0),
     max_retries=1,  # streaming so avoid duplpicating partial output
 )
 
@@ -77,12 +83,22 @@ Provide a structured, high-quality response that someone aiming for top-tier per
     ]
 
 
+# server sent events for real time updates
+def sse_event(event: str, data: dict) -> str:
+    import json
+
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
 @app.post("/")
 async def root(request: Request, body: QueryRequest):
-    log.info("request_started", path="/", model="grok-4-1-fast")
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    request_context = {"request_id": request_id, "model": MODEL}
+
+    log.info("request_started", **request_context)
 
     if not os.getenv("GROK_API_KEY"):
-        log.error("missing_api_key")
+        log.error("missing_api_key", **request_context)
         raise HTTPException(
             status_code=500, detail="XAI_API_KEY environment variable is missing."
         )
@@ -90,79 +106,224 @@ async def root(request: Request, body: QueryRequest):
     formatted_messages = build_messages(body.query)
 
     return StreamingResponse(
-        stream_grok_response(formatted_messages), media_type="text/plain"
+        stream_grok_response(formatted_messages, request_context=request_context),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
+        },
     )
 
 
-async def stream_grok_response(messages: list[dict]):
+async def stream_grok_response(
+    messages: list[dict], request_context: dict
+) -> AsyncGenerator[str, None]:
     """
     yielding text chunks from Grok as they arrive
     """
-    log.info("stream_started", model="grok-4-1-fast", message_count=len(messages))
+    request_id = request_context["request_id"]
 
-    max_retries = 3
+    yield sse_event(
+        "status",
+        {
+            "state": "generating",
+            "request_id": request_id,
+        },
+    )
 
-    for attempt in range(max_retries + 1):
+    partial_response: list[str] = []
+    finish_reason: str | None = None
+    usage: dict | None = None
+
+    log.info("stream_started", model=MODEL, message_count=len(messages))
+
+    for attempt in range(MAX_RETRIES + 1):
 
         try:
-            yield "Generating finance research report... \n\n"
-
             # requesting streaming response from xAI endpoint
             stream = await client.chat.completions.create(
-                model="grok-4-1-fast", messages=messages, stream=True
+                model=MODEL,
+                messages=messages,
+                stream=True,
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+                stream_options={"include_usage": True},
             )
 
-            first_chunk = True
             async for chunk in stream:
-                content = chunk.choices[0].delta.content
-                if content:
-                    if first_chunk:
-                        log.info("first_chunk_recieved", model="grok-4-1-fast")
-                        first_chunk = False
-                    yield content
+                if not chunk.choices:
+                    if getattr(chunk, "usage", None):
+                        usage = chunk.usage.model_dump()
+                    continue
 
-            log.info("stream_completed", model="grok-4-1-fast")
+                choice = chunk.choices[0]
 
-            return  # exiting retry loop
+                if choice.delta and choice.delta.content:
+                    content = choice.delta.content
+                    partial_response.append(content)
 
-        except APIStatusError as e:
-            if e.status_code == 429:
-                if attempt == max_retries:
-                    log.warning("rate_limit_exhausted", attempts=attempt + 1)
+                    yield sse_event("token", {"content": content})
 
-                    yield "\n\n[Too many requests. Please try again in a minute.]"
-                    return
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
 
-                # adhere to retry after if server sent it
-                retry_after = e.response.headers.get("Retry-After")
-                if retry_after:
-                    wait = float(retry_after)
-                else:
-                    # fallback: exceptional backoff + jitter
-                    wait = min(2**attempt + random.uniform(0, 1), 30)
+            break
 
-                log.warning(
-                    "rate_limited",
+        except APIStatusError as error:
+            if error.status_code != 429 or attempt == MAX_RETRIES:
+                log.error(
+                    "provider_request_failed",
+                    **request_context,
+                    status_code=error.status_code,
                     attempt=attempt + 1,
-                    wait_seconds=wait,
-                    model="grok-4-1-fast",
                 )
-                await asyncio.sleep(wait)
-                continue
 
-            ## no retry for any other status error
-            log.error("stream_api_error", status=e.status_code, error=str(e))
-            yield "\n\n[An error occured. Please try again.]"
-            return
+                yield sse_event(
+                    "error",
+                    {
+                        "code": "provider_error",
+                        "message": "The AI service is temporarily unavailable. Please try again.",
+                        "retryable": error.status_code == 429,
+                    },
+                )
+                return
+
+            retry_after = error.response.headers.get("Retry-After")
+            wait_seconds = (
+                float(retry_after)
+                if retry_after
+                else min(2**attempt + random.uniform(0, 1), 30)
+            )
+
+            log.warning(
+                "provider_rate_limited",
+                **request_context,
+                attempt=attempt + 1,
+                wait_seconds=wait_seconds,
+            )
+
+            await asyncio.sleep(wait_seconds)
 
         except APITimeoutError:
-            log.warning("stream_timeout", model="grok-4-1-fast")
-            yield "\n\n[Request timed out. Please try again.]"
+            log.warning(
+                "provider_timeout",
+                **request_context,
+                attempt=attempt + 1,
+            )
 
-        except APIConnectionError as e:
-            log.warning("stream_connection_error", error=str(e), model="grok-4-1-fast")
-            yield "\n\n[Connection error. Please try again.]"
+            if attempt == MAX_RETRIES:
+                yield sse_event(
+                    "error",
+                    {
+                        "code": "timeout",
+                        "message": "The AI service took too long to respond. Please try again.",
+                        "retryable": True,
+                    },
+                )
+                return
 
-        except Exception as e:
-            log.error("stream_failed", error=str(e), model="grok-4-1-fast")
-            yield f"\n\n[An error occured. Please try again.]"
+            await asyncio.sleep(min(2**attempt, 5))
+
+        except APIConnectionError as error:
+            log.warning(
+                "provider_connection_error",
+                **request_context,
+                attempt=attempt + 1,
+                error=str(error),
+            )
+
+            if attempt == MAX_RETRIES:
+                yield sse_event(
+                    "error",
+                    {
+                        "code": "connection_error",
+                        "message": "Could not connect to the AI service. Please try again.",
+                        "retryable": True,
+                    },
+                )
+                return
+
+            await asyncio.sleep(min(2**attempt, 5))
+
+        except Exception as error:
+            log.exception(
+                "unexpected_stream_failure",
+                **request_context,
+            )
+
+            yield sse_event(
+                "error",
+                {
+                    "code": "internal_error",
+                    "message": "An unexpected error occurred. Please try again.",
+                    "retryable": False,
+                },
+            )
+            return
+
+    truncated = finish_reason == "length"
+    assistant_content = "".join(partial_response)
+
+    log.info(
+        "stream_completed",
+        **request_context,
+        finish_reason=finish_reason,
+        truncated=truncated,
+        output_tokens=usage.get("completion_tokens") if usage else None,
+        prompt_tokens=usage.get("prompt_tokens") if usage else None,
+    )
+
+    yield sse_event(
+        "done",
+        {
+            "request_id": request_id,
+            "finish_reason": finish_reason,
+            "truncated": truncated,
+            "usage": usage,
+            "partial_assistant_content": assistant_content if truncated else None,
+        },
+    )
+
+
+class ContinueRequest(BaseModel):
+    query: str
+    partial_assistant_content: str = Field(..., min_length=1)
+
+
+@app.post("/continue")
+async def continue_chat(
+    request: Request,
+    body: ContinueRequest,
+) -> StreamingResponse:
+    messages = build_messages(body.query)
+
+    messages.append(
+        {
+            "role": "assistant",
+            "content": body.partial_assistant_content,
+        }
+    )
+
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "Continue exactly where you stopped. "
+                "Do not repeat any previous content."
+            ),
+        }
+    )
+
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+
+    return StreamingResponse(
+        stream_grok_response(
+            messages=messages,
+            request_context={
+                "request_id": request_id,
+                "model": MODEL,
+                "continuation": True,
+            },
+        ),
+        media_type="text/event-stream",
+    )
