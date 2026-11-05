@@ -8,16 +8,22 @@ dependencies = [
     "fastapi[standard]>=0.162.0",
     "httpx>=0.28.1",
     "openai>=3.42.0",
-    "pytest>=9.2.0",
-    "pytest-asyncio>=1.4.1.post1",
     "python-dotenv>=1.2.4",
     "structlog>=26.1.0",
     "uvicorn>=0.54.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-
-[tool.pytest.ini_options.markers]
-live_eval = "Tests that call a real LLM provider and may cost money"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "live_eval: Tests that call a real LLM provider and may cost money",
+]

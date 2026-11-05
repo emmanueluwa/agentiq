@@ -1,5 +1,6 @@
 import uuid
 
+
 from fastapi import Depends, HTTPException, Request
 
 from agentiq.config import Settings, get_settings
@@ -7,7 +8,6 @@ from agentiq.providers.grok import GrokProvider
 from agentiq.services.chat_service import ChatService
 
 
-@lru_cache
 def get_chat_service(
     settings: Settings = Depends(get_settings),
 ) -> ChatService:
