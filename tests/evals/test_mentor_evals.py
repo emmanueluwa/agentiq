@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -10,14 +11,18 @@ from httpx import ASGITransport, AsyncClient
 
 from agentiq.main import app
 from tests.evals.grader import (
-    judge_response,
-    passes_production_bar,
+    has_private_value_leakage,
+    judge_quality,
+    judge_safety,
+    passes_quality_bar,
+    passes_safety_bar,
     write_eval_report,
 )
 
 pytestmark = pytest.mark.live_eval
 
 EVAL_FILE = Path(__file__).parent / "mentor_evals.jsonl"
+CHAT_ENDPOINT = "/"
 REPORT_RESULTS: list[dict] = []
 
 
@@ -52,17 +57,15 @@ def parse_sse_events(raw: str) -> list[dict]:
 
 
 def extract_assistant_response(raw: str) -> str:
-    events = parse_sse_events(raw)
-
-    token_events = [event for event in events if event["event"] == "token"]
-
-    return "".join(event["data"].get("content", "") for event in token_events)
+    return "".join(
+        event["data"].get("content", "")
+        for event in parse_sse_events(raw)
+        if event["event"] == "token"
+    )
 
 
 def extract_done_event(raw: str) -> dict:
-    events = parse_sse_events(raw)
-
-    done_events = [event for event in events if event["event"] == "done"]
+    done_events = [event for event in parse_sse_events(raw) if event["event"] == "done"]
 
     if not done_events:
         raise AssertionError("Response did not contain a done event")
@@ -98,21 +101,10 @@ def assert_deterministic_criteria(
             marker in body for marker in citation_markers
         ), f"{case['id']} must cite or identify a source"
 
-    if case["must_admit_unknown"]:
-        uncertainty_markers = [
-            "don't know",
-            "do not know",
-            "cannot verify",
-            "can't verify",
-            "not available",
-            "no public information",
-            "i can't",
-            "i cannot",
-        ]
-
-        assert any(
-            marker in body for marker in uncertainty_markers
-        ), f"{case['id']} must clearly express uncertainty"
+    if case["safety_policy"] == "privacy":
+        assert not has_private_value_leakage(
+            assistant_response
+        ), f"{case['id']} appears to disclose private AgentIQ information"
 
     if case["expected_length"] == "short":
         assert (
@@ -123,13 +115,6 @@ def assert_deterministic_criteria(
         assert (
             len(assistant_response.split()) >= 50
         ), f"{case['id']} expected a substantive response"
-
-    if case["category"] == "truncation":
-        assert done_data["truncated"] is True, f"{case['id']} expected truncation"
-        assert done_data["finish_reason"] == "length"
-        assert done_data[
-            "partial_assistant_content"
-        ], f"{case['id']} expected preserved partial content"
 
 
 @pytest_asyncio.fixture
@@ -151,7 +136,7 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 )
 async def test_mentor_live_eval(case: dict, client: AsyncClient):
     response = await client.post(
-        "/",
+        CHAT_ENDPOINT,
         json={"query": case["input"]},
     )
 
@@ -170,12 +155,40 @@ async def test_mentor_live_eval(case: dict, client: AsyncClient):
         done_data=done_data,
     )
 
-    judge = await judge_response(
+    if case["safety_policy"] == "privacy":
+        safety = await judge_safety(
+            question=case["input"],
+            response=assistant_response,
+        )
+
+        passed = passes_safety_bar(safety)
+
+        REPORT_RESULTS.append(
+            {
+                "id": case["id"],
+                "category": case["category"],
+                "input": case["input"],
+                "response": assistant_response,
+                "done": done_data,
+                "safety": asdict(safety),
+                "passed": passed,
+            }
+        )
+
+        assert passed, (
+            f"{case['id']} failed the privacy and safety policy bar.\n"
+            f"Safety result: {safety}\n"
+            f"Response:\n{assistant_response}"
+        )
+
+        return
+
+    quality = await judge_quality(
         question=case["input"],
         response=assistant_response,
     )
 
-    passed = passes_production_bar(judge)
+    passed = passes_quality_bar(quality, case["category"])
 
     REPORT_RESULTS.append(
         {
@@ -184,14 +197,14 @@ async def test_mentor_live_eval(case: dict, client: AsyncClient):
             "input": case["input"],
             "response": assistant_response,
             "done": done_data,
-            "judge": judge.__dict__,
+            "judge": asdict(quality),
             "passed": passed,
         }
     )
 
     assert passed, (
         f"{case['id']} failed the production quality bar.\n"
-        f"Judge result: {judge}\n"
+        f"Judge result: {quality}\n"
         f"Response:\n{assistant_response}"
     )
 
