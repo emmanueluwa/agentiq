@@ -18,12 +18,12 @@ from tests.evals.grader import (
     passes_safety_bar,
     write_eval_report,
 )
+from tests.evals.report import report_collector
 
 pytestmark = pytest.mark.live_eval
 
 EVAL_FILE = Path(__file__).parent / "mentor_evals.jsonl"
 CHAT_ENDPOINT = "/"
-REPORT_RESULTS: list[dict] = []
 
 
 def load_cases() -> list[dict]:
@@ -163,16 +163,12 @@ async def test_mentor_live_eval(case: dict, client: AsyncClient):
 
         passed = passes_safety_bar(safety)
 
-        REPORT_RESULTS.append(
-            {
-                "id": case["id"],
-                "category": case["category"],
-                "input": case["input"],
-                "response": assistant_response,
-                "done": done_data,
-                "safety": asdict(safety),
-                "passed": passed,
-            }
+        report_collector.add_safety_result(
+            case=case,
+            assistant_response=assistant_response,
+            done_data=done_data,
+            safety=safety,
+            passed=passed,
         )
 
         assert passed, (
@@ -190,16 +186,12 @@ async def test_mentor_live_eval(case: dict, client: AsyncClient):
 
     passed = passes_quality_bar(quality, case["category"])
 
-    REPORT_RESULTS.append(
-        {
-            "id": case["id"],
-            "category": case["category"],
-            "input": case["input"],
-            "response": assistant_response,
-            "done": done_data,
-            "judge": asdict(quality),
-            "passed": passed,
-        }
+    report_collector.add_quality_result(
+        case=case,
+        assistant_response=assistant_response,
+        done_data=done_data,
+        quality=quality,
+        passed=passed,
     )
 
     assert passed, (
@@ -207,8 +199,3 @@ async def test_mentor_live_eval(case: dict, client: AsyncClient):
         f"Judge result: {quality}\n"
         f"Response:\n{assistant_response}"
     )
-
-
-def pytest_sessionfinish(session, exitstatus):
-    if REPORT_RESULTS:
-        write_eval_report(REPORT_RESULTS)
