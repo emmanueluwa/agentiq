@@ -188,3 +188,4 @@ yarn-error.log*
 *.bak
 *.orig
 .hypothesis/
+commands.txt
