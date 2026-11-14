@@ -10,6 +10,10 @@ from agentiq.config import get_settings
 from agentiq.learning.diagnostic_service import DiagnosticService
 from agentiq.learning.profile_service import LearningProfileService
 from agentiq.learning.providers import GrokLearningModelProvider
+from agentiq.learning.repositories import (
+    DiagnosticRepository,
+    InMemoryDiagnosticRepository,
+)
 from agentiq.learning.skill_graph import SkillGraph
 
 
@@ -17,8 +21,8 @@ from agentiq.learning.skill_graph import SkillGraph
 def get_skill_graph() -> SkillGraph:
     """Return the process-level skill graph.
 
-    The graph is read-mostly and intended to be loaded from durable storage
-    or curated configuration in a later persistence step.
+    This is a transitional in-memory implementation. A production system will
+    load and persist skill definitions through a durable repository.
     """
     return SkillGraph()
 
@@ -27,10 +31,21 @@ def get_skill_graph() -> SkillGraph:
 def get_profile_service() -> LearningProfileService:
     """Return the process-level learning profile service.
 
-    This is a temporary in-memory implementation. It will be replaced by a
-    durable repository-backed service without changing the route interface.
+    This is a transitional in-memory implementation. A production system will
+    replace it with a durable repository-backed service.
     """
     return LearningProfileService()
+
+
+@lru_cache
+def get_diagnostic_repository() -> DiagnosticRepository:
+    """Return the diagnostic repository implementation.
+
+    This is a transitional in-memory implementation. It is isolated behind
+    the repository interface so it can be replaced by durable persistence
+    without changing DiagnosticService or API routes.
+    """
+    return InMemoryDiagnosticRepository()
 
 
 def get_grok_client() -> AsyncOpenAI:
@@ -65,10 +80,15 @@ def get_diagnostic_service(
         Depends(get_learning_model_provider),
     ],
     skill_graph: Annotated[SkillGraph, Depends(get_skill_graph)],
+    diagnostic_repository: Annotated[
+        DiagnosticRepository,
+        Depends(get_diagnostic_repository),
+    ],
 ) -> DiagnosticService:
     return DiagnosticService(
         model_provider=model_provider,
         skill_graph=skill_graph,
+        diagnostic_repository=diagnostic_repository,
     )
 
 

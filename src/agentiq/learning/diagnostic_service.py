@@ -15,7 +15,7 @@ from agentiq.learning.models import (
 from agentiq.learning.providers import LearningModelProvider
 from agentiq.learning.repositories import (
     DiagnosticRepository,
-    DiagnosticRepositoryError,
+    RepositoryError,
 )
 from agentiq.learning.skill_graph import SkillGraph
 

@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agentiq.api.routes import router
 from agentiq.config import get_settings
 from agentiq.logging import configure_logging
+from agentiq.api.routes_learning import router as learning_router
 
 configure_logging()
 
@@ -24,6 +25,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(learning_router)
 
 
 @app.get("/health")
