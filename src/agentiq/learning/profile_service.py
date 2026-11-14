@@ -9,10 +9,12 @@ from agentiq.learning.models import (
     AssessmentStatus,
     CreateProfileRequest,
     EvidenceType,
+    LearnerGoal,
     LearnerProfile,
     MasteryStatus,
     SkillState,
     UpdateProfileRequest,
+    LearnerConstraint,
     utc_now,
 )
 
@@ -89,6 +91,20 @@ class LearningProfileService:
         if not updates:
             return profile
 
+        if "constraints" in updates:
+            current_constraints = profile.constraints
+
+            updates["constraints"] = current_constraints.model_copy(
+                update=updates["constraints"]
+            )
+
+        if "preferences" in updates:
+            current_preferences = profile.preferences
+
+            updates["preferences"] = current_preferences.model_copy(
+                update=updates["preferences"]
+            )
+
         updated_profile = profile.model_copy(
             update={
                 **updates,
@@ -97,6 +113,7 @@ class LearningProfileService:
         )
 
         self._profiles[profile_id] = updated_profile
+
         return updated_profile
 
     async def record_assessment(
