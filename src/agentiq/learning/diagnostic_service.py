@@ -10,10 +10,13 @@ from agentiq.learning.models import (
     DiagnosticBlueprint,
     DiagnosticQuestion,
     DiagnosticResponse,
-    EvidenceType,
     LearnerProfile,
 )
 from agentiq.learning.providers import LearningModelProvider
+from agentiq.learning.repositories import (
+    DiagnosticRepository,
+    DiagnosticRepositoryError,
+)
 from agentiq.learning.skill_graph import SkillGraph
 
 
@@ -25,11 +28,15 @@ class DiagnosticValidationError(DiagnosticServiceError):
     pass
 
 
+class DiagnosticNotFoundError(DiagnosticServiceError):
+    pass
+
+
 class DiagnosticService:
     """Creates and evaluates domain-agnostic learning diagnostics.
 
     The service uses an LLM to propose a diagnostic blueprint and questions,
-    but it validates all generated structure before exposing it to a learner.
+    but validates all generated structure before exposing it to a learner.
     It does not treat model output as an authoritative measure of ability.
     """
 
@@ -37,9 +44,11 @@ class DiagnosticService:
         self,
         model_provider: LearningModelProvider,
         skill_graph: SkillGraph,
+        diagnostic_repository: DiagnosticRepository,
     ) -> None:
         self._model_provider = model_provider
         self._skill_graph = skill_graph
+        self._diagnostic_repository = diagnostic_repository
 
     async def create_blueprint(
         self,
@@ -47,7 +56,6 @@ class DiagnosticService:
         topic: str,
         learning_objective: str,
     ) -> DiagnosticBlueprint:
-        """Create a validated diagnostic blueprint for any learning topic."""
         if not topic.strip():
             raise DiagnosticValidationError("Topic must not be empty.")
 
@@ -69,14 +77,15 @@ class DiagnosticService:
 
         self._validate_blueprint(blueprint)
 
-        return blueprint
+        return await self._diagnostic_repository.save_blueprint(blueprint)
 
     async def generate_questions(
         self,
         profile: LearnerProfile,
-        blueprint: DiagnosticBlueprint,
+        blueprint_id: UUID,
     ) -> list[DiagnosticQuestion]:
-        """Generate validated questions for a diagnostic blueprint."""
+        blueprint = await self._get_blueprint(blueprint_id)
+
         raw_questions = await self._model_provider.generate_diagnostic_questions(
             profile=profile,
             blueprint=blueprint,
@@ -115,16 +124,20 @@ class DiagnosticService:
         if len(questions) > blueprint.question_count:
             questions = questions[: blueprint.question_count]
 
-        return questions
+        return await self._diagnostic_repository.save_questions(
+            blueprint_id=blueprint.id,
+            questions=questions,
+        )
 
     async def assess_responses(
         self,
         profile: LearnerProfile,
-        blueprint: DiagnosticBlueprint,
-        questions: list[DiagnosticQuestion],
+        blueprint_id: UUID,
         responses: list[DiagnosticResponse],
     ) -> AssessmentResult:
-        """Assess learner responses against a rubric and produce evidence."""
+        blueprint = await self._get_blueprint(blueprint_id)
+        questions = await self._get_questions(blueprint_id)
+
         self._validate_assessment_inputs(
             blueprint=blueprint,
             questions=questions,
@@ -135,11 +148,15 @@ class DiagnosticService:
             response.question_id: response for response in responses
         }
 
+        ordered_responses = [
+            response_by_question_id[question.id] for question in questions
+        ]
+
         raw_result = await self._model_provider.assess_diagnostic_responses(
             profile=profile,
             blueprint=blueprint,
             questions=questions,
-            responses=[response_by_question_id[question.id] for question in questions],
+            responses=ordered_responses,
         )
 
         try:
@@ -156,10 +173,39 @@ class DiagnosticService:
                 "The generated assessment result was invalid."
             ) from error
 
-        return self._finalize_result(
+        result = self._finalize_result(
             result=result,
             blueprint=blueprint,
         )
+
+        return await self._diagnostic_repository.save_assessment_result(result=result)
+
+    async def _get_blueprint(
+        self,
+        blueprint_id: UUID,
+    ) -> DiagnosticBlueprint:
+        try:
+            return await self._diagnostic_repository.get_blueprint(
+                blueprint_id=blueprint_id
+            )
+        except DiagnosticRepositoryError as error:
+            raise DiagnosticNotFoundError("Diagnostic blueprint not found.") from error
+
+    async def _get_questions(
+        self,
+        blueprint_id: UUID,
+    ) -> list[DiagnosticQuestion]:
+        try:
+            questions = await self._diagnostic_repository.get_questions(
+                blueprint_id=blueprint_id
+            )
+        except DiagnosticRepositoryError as error:
+            raise DiagnosticNotFoundError("Diagnostic questions not found.") from error
+
+        if not questions:
+            raise DiagnosticNotFoundError("Diagnostic questions not found.")
+
+        return questions
 
     def _validate_blueprint(
         self,
@@ -179,7 +225,7 @@ class DiagnosticService:
         for prerequisite_id in blueprint.prerequisite_skill_ids:
             if not self._skill_graph.has_skill(prerequisite_id):
                 raise DiagnosticValidationError(
-                    f"Blueprint references an unknown prerequisite: "
+                    "Blueprint references an unknown prerequisite: "
                     f"{prerequisite_id}"
                 )
 
@@ -228,20 +274,15 @@ class DiagnosticService:
         result: AssessmentResult,
         blueprint: DiagnosticBlueprint,
     ) -> AssessmentResult:
-        """Apply system-level policy after model assessment."""
         minimum_score = blueprint.rubric.minimum_score
 
-        if result.overall_score < minimum_score:
-            passed = False
-        else:
-            passed = result.passed
-
-        if result.status == AssessmentStatus.NEEDS_MORE_INFORMATION:
-            passed = False
+        passed = (
+            result.status != AssessmentStatus.NEEDS_MORE_INFORMATION
+            and result.overall_score >= minimum_score
+        )
 
         return result.model_copy(
             update={
                 "passed": passed,
-                "status": result.status,
             }
         )
