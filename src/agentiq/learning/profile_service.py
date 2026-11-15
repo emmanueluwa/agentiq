@@ -3,24 +3,28 @@ from __future__ import annotations
 from datetime import timedelta
 from uuid import UUID
 
+from agentiq.learning.assessment_evidence_repository import (
+    AssessmentEvidenceNotFoundError,
+    AssessmentEvidenceRepository,
+)
 from agentiq.learning.models import (
     AssessmentEvidence,
     AssessmentResult,
     AssessmentStatus,
     CreateProfileRequest,
     EvidenceType,
+    LearnerConstraint,
     LearnerGoal,
     LearnerProfile,
     MasteryStatus,
     SkillState,
     UpdateProfileRequest,
-    LearnerConstraint,
     utc_now,
 )
-
-
-class ProfileNotFoundError(Exception):
-    """Raised when a learner profile cannot be found."""
+from agentiq.learning.profile_repository import (
+    ProfileNotFoundError,
+    ProfileRepository,
+)
 
 
 class ProfileServiceError(Exception):
@@ -30,16 +34,18 @@ class ProfileServiceError(Exception):
 class LearningProfileService:
     """Owns learner profile state and evidence-derived skill progression.
 
-    This service is intentionally provider-agnostic. It does not call an LLM,
-    select practice problems, generate roadmaps, or retrieve external content.
+    The service is persistence-agnostic and provider-agnostic. It does not
+    call an LLM, select practice problems, generate roadmaps, or retrieve
+    external content.
     """
 
-    def __init__(self) -> None:
-        # In-memory persistence is intentional for this feature slice.
-        # It will be replaced by a durable repository without changing the
-        # public service interface.
-        self._profiles: dict[UUID, LearnerProfile] = {}
-        self._evidence: dict[UUID, AssessmentEvidence] = {}
+    def __init__(
+        self,
+        profile_repository: ProfileRepository,
+        evidence_repository: AssessmentEvidenceRepository,
+    ) -> None:
+        self._profile_repository = profile_repository
+        self._evidence_repository = evidence_repository
 
     async def create_profile(
         self,
@@ -68,16 +74,10 @@ class LearningProfileService:
             target_timeline=request.target_timeline,
         )
 
-        self._profiles[profile.id] = profile
-        return profile
+        return await self._profile_repository.save_profile(profile)
 
     async def get_profile(self, profile_id: UUID) -> LearnerProfile:
-        profile = self._profiles.get(profile_id)
-
-        if profile is None:
-            raise ProfileNotFoundError("Learning profile not found.")
-
-        return profile
+        return await self._profile_repository.get_profile(profile_id)
 
     async def update_profile(
         self,
@@ -92,16 +92,12 @@ class LearningProfileService:
             return profile
 
         if "constraints" in updates:
-            current_constraints = profile.constraints
-
-            updates["constraints"] = current_constraints.model_copy(
+            updates["constraints"] = profile.constraints.model_copy(
                 update=updates["constraints"]
             )
 
         if "preferences" in updates:
-            current_preferences = profile.preferences
-
-            updates["preferences"] = current_preferences.model_copy(
+            updates["preferences"] = profile.preferences.model_copy(
                 update=updates["preferences"]
             )
 
@@ -112,9 +108,7 @@ class LearningProfileService:
             }
         )
 
-        self._profiles[profile_id] = updated_profile
-
-        return updated_profile
+        return await self._profile_repository.update_profile(updated_profile)
 
     async def record_assessment(
         self,
@@ -122,7 +116,6 @@ class LearningProfileService:
         assessment_result: AssessmentResult,
         evidence_type: EvidenceType = EvidenceType.CONCEPT_CHECK,
     ) -> AssessmentEvidence:
-        """Record assessment evidence and update the learner's skill state."""
         profile = await self.get_profile(profile_id)
 
         if assessment_result.profile_id != profile_id:
@@ -142,16 +135,17 @@ class LearningProfileService:
             notes=assessment_result.assessor_notes,
         )
 
-        self._evidence[evidence.id] = evidence
+        saved_evidence = await self._evidence_repository.save_evidence(evidence)
 
         updated_profile = self._apply_assessment_to_profile(
             profile=profile,
             assessment_result=assessment_result,
-            evidence=evidence,
+            evidence=saved_evidence,
         )
 
-        self._profiles[profile_id] = updated_profile
-        return evidence
+        await self._profile_repository.update_profile(updated_profile)
+
+        return saved_evidence
 
     async def get_evidence(
         self,
@@ -160,9 +154,12 @@ class LearningProfileService:
     ) -> AssessmentEvidence:
         await self.get_profile(profile_id)
 
-        evidence = self._evidence.get(evidence_id)
+        try:
+            evidence = await self._evidence_repository.get_evidence(evidence_id)
+        except AssessmentEvidenceNotFoundError as error:
+            raise ProfileNotFoundError("Assessment evidence not found.") from error
 
-        if evidence is None or evidence.profile_id != profile_id:
+        if evidence.profile_id != profile_id:
             raise ProfileNotFoundError("Assessment evidence not found.")
 
         return evidence
