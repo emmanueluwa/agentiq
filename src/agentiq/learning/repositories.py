@@ -10,15 +10,15 @@ from agentiq.learning.models import (
 )
 
 
-class RepositoryError(Exception):
+class DiagnosticRepositoryError(Exception):
     """Raised when a repository operation cannot be completed safely."""
 
 
-class EntityNotFoundError(RepositoryError):
+class EntityNotFoundError(DiagnosticRepositoryError):
     """Raised when a requested entity does not exist."""
 
 
-class ConcurrencyError(RepositoryError):
+class ConcurrencyError(DiagnosticRepositoryError):
     """Raised when concurrent writes conflict."""
 
 
