@@ -13,7 +13,7 @@ from agentiq.learning.models import (
     LearnerProfile,
 )
 from agentiq.learning.providers import LearningModelProvider
-from agentiq.learning.repositories import (
+from agentiq.learning.diagnostic_repository import (
     DiagnosticRepository,
     DiagnosticRepositoryError,
 )

@@ -107,7 +107,7 @@ class InMemoryDiagnosticRepository(DiagnosticRepository):
 
         for question in questions:
             if question.blueprint_id != blueprint_id:
-                raise RepositoryError(
+                raise DiagnosticRepositoryError(
                     "Question does not belong to the specified blueprint."
                 )
 
