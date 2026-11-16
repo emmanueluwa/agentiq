@@ -17,7 +17,7 @@ from agentiq.learning.models import (
     LearnerProfile,
 )
 from agentiq.learning.providers import LearningModelProvider, LearningModelProviderError
-from agentiq.learning.repositories import InMemoryDiagnosticRepository
+from agentiq.learning.diagnostic_repository import InMemoryDiagnosticRepository
 from agentiq.learning.skill_graph import SkillGraph, SkillNode
 
 
