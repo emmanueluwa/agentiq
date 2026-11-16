@@ -60,7 +60,9 @@ async def test_update_existing_profile() -> None:
         }
     )
 
-    result = await repository.update_profile(updated_profile)
+    result = await repository.update_profile(
+        updated_profile, expected_version=profile.version
+    )
     retrieved_profile = await repository.get_profile(profile.id)
 
     assert result.constraints.weekly_hours_available == 15
@@ -73,7 +75,7 @@ async def test_update_missing_profile_raises_not_found() -> None:
     profile = build_profile()
 
     with pytest.raises(ProfileNotFoundError):
-        await repository.update_profile(profile)
+        await repository.update_profile(profile, expected_version=profile.version)
 
 
 @pytest.mark.asyncio
@@ -93,6 +95,22 @@ async def test_delete_missing_profile_raises_not_found() -> None:
 
     with pytest.raises(ProfileNotFoundError):
         await repository.delete_profile(uuid.uuid4())
+
+
+@pytest.mark.asyncio
+async def test_update_with_stale_version_raises_conflict() -> None:
+    repository = InMemoryProfileRepository()
+    profile = build_profile()
+
+    await repository.save_profile(profile)
+
+    stale_profile = profile.model_copy(update={"target_role": "stale writer"})
+
+    with pytest.raises(ProfileConcurrencyError):
+        await repository.update_profile(
+            stale_profile,
+            expected_version=profile.version - 1,
+        )
 
 
 def test_profile_repository_is_abstract() -> None:

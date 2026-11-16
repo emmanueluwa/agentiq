@@ -102,7 +102,10 @@ class LearningProfileService:
                 }
             )
 
-            return await unit_of_work.profile_repository.update_profile(updated_profile)
+            return await unit_of_work.profile_repository.update_profile(
+                updated_profile,
+                expected_version=profile.version,
+            )
 
     async def record_assessment(
         self,
@@ -152,7 +155,10 @@ class LearningProfileService:
                 evidence=saved_evidence,
             )
 
-            await unit_of_work.profile_repository.update_profile(updated_profile)
+            await unit_of_work.profile_repository.update_profile(
+                updated_profile,
+                expected_version=profile.version,
+            )
 
             return saved_evidence
 

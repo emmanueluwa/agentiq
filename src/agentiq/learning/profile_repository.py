@@ -15,7 +15,7 @@ class ProfileNotFoundError(ProfileRepositoryError):
 
 
 class ProfileConcurrencyError(ProfileRepositoryError):
-    """Raised when concurrent profile writes conflict."""
+    """Raised when a profile update conflicts with a newer persisted version."""
 
 
 class ProfileRepository(ABC):
@@ -26,7 +26,7 @@ class ProfileRepository(ABC):
         self,
         profile: LearnerProfile,
     ) -> LearnerProfile:
-        """Create or replace a learner profile."""
+        """Create a learner profile."""
 
     @abstractmethod
     async def get_profile(
@@ -39,8 +39,9 @@ class ProfileRepository(ABC):
     async def update_profile(
         self,
         profile: LearnerProfile,
+        expected_version: int,
     ) -> LearnerProfile:
-        """Replace an existing learner profile."""
+        """Update a profile only when its persisted version is unchanged."""
 
     @abstractmethod
     async def delete_profile(
@@ -51,12 +52,7 @@ class ProfileRepository(ABC):
 
 
 class InMemoryProfileRepository(ProfileRepository):
-    """In-memory implementation for local development and tests.
-
-    This is not durable production persistence. It is isolated behind
-    ProfileRepository so it can be replaced by PostgreSQL or another durable
-    backend without changing LearningProfileService.
-    """
+    """In-memory implementation for local development and tests."""
 
     def __init__(self) -> None:
         self._profiles: dict[UUID, LearnerProfile] = {}
@@ -65,6 +61,11 @@ class InMemoryProfileRepository(ProfileRepository):
         self,
         profile: LearnerProfile,
     ) -> LearnerProfile:
+        if profile.id in self._profiles:
+            raise ProfileConcurrencyError(
+                f"Learner profile already exists: {profile.id}"
+            )
+
         self._profiles[profile.id] = profile
         return profile
 
@@ -82,12 +83,24 @@ class InMemoryProfileRepository(ProfileRepository):
     async def update_profile(
         self,
         profile: LearnerProfile,
+        expected_version: int,
     ) -> LearnerProfile:
-        if profile.id not in self._profiles:
+        current_profile = self._profiles.get(profile.id)
+
+        if current_profile is None:
             raise ProfileNotFoundError(f"Learner profile not found: {profile.id}")
 
-        self._profiles[profile.id] = profile
-        return profile
+        if current_profile.version != expected_version:
+            raise ProfileConcurrencyError(
+                "Learner profile was modified by another operation."
+            )
+
+        updated_profile = profile.model_copy(
+            update={"version": current_profile.version + 1}
+        )
+
+        self._profiles[profile.id] = updated_profile
+        return updated_profile
 
     async def delete_profile(
         self,

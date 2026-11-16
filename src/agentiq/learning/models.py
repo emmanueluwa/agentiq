@@ -117,6 +117,7 @@ class SkillState(BaseModel):
 
 class LearnerProfile(BaseModel):
     model_config = ConfigDict(frozen=True)
+    version: int = 1
 
     id: UUID = Field(default_factory=uuid4)
     created_at: datetime = Field(default_factory=utc_now)

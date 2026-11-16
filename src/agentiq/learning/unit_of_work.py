@@ -78,40 +78,51 @@ class InMemoryLearningUnitOfWork(LearningUnitOfWork):
 class _TransactionalProfileRepository(ProfileRepository):
     def __init__(self, repository: ProfileRepository) -> None:
         self._repository = repository
-        self._staged_profiles: dict[UUID, object] = {}
+        self._staged_creates: dict[UUID, object] = {}
+        self._staged_updates: dict[UUID, tuple[object, int]] = {}
+        self._staged_deletes: set[UUID] = set()
 
     async def save_profile(self, profile):
-        self._staged_profiles[profile.id] = profile
+        self._staged_creates[profile.id] = profile
         return profile
 
     async def get_profile(self, profile_id: UUID):
         return await self._repository.get_profile(profile_id)
 
-    async def update_profile(self, profile):
+    async def update_profile(
+        self,
+        profile,
+        expected_version: int,
+    ):
         await self._repository.get_profile(profile.id)
-        self._staged_profiles[profile.id] = profile
+        self._staged_updates[profile.id] = (profile, expected_version)
         return profile
 
     async def delete_profile(self, profile_id: UUID) -> None:
         await self._repository.get_profile(profile_id)
-        self._staged_profiles[profile_id] = None
+        self._staged_deletes.add(profile_id)
 
     async def commit(self) -> None:
-        for profile_id, profile in self._staged_profiles.items():
-            if profile is None:
-                await self._repository.delete_profile(profile_id)
-                continue
+        for profile in self._staged_creates.values():
+            await self._repository.save_profile(profile)
 
-            try:
-                await self._repository.get_profile(profile_id)
-                await self._repository.update_profile(profile)
-            except Exception:
-                await self._repository.save_profile(profile)
+        for profile, expected_version in self._staged_updates.values():
+            await self._repository.update_profile(
+                profile,
+                expected_version=expected_version,
+            )
 
-        self._staged_profiles.clear()
+        for profile_id in self._staged_deletes:
+            await self._repository.delete_profile(profile_id)
+
+        self._staged_creates.clear()
+        self._staged_updates.clear()
+        self._staged_deletes.clear()
 
     async def rollback(self) -> None:
-        self._staged_profiles.clear()
+        self._staged_creates.clear()
+        self._staged_updates.clear()
+        self._staged_deletes.clear()
 
 
 class _TransactionalEvidenceRepository(AssessmentEvidenceRepository):
