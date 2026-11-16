@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from uuid import UUID
 
 from agentiq.learning.assessment_evidence_repository import (
     AssessmentEvidenceNotFoundError,
-    AssessmentEvidenceRepository,
 )
 from agentiq.learning.models import (
     AssessmentEvidence,
@@ -21,10 +21,8 @@ from agentiq.learning.models import (
     UpdateProfileRequest,
     utc_now,
 )
-from agentiq.learning.profile_repository import (
-    ProfileNotFoundError,
-    ProfileRepository,
-)
+from agentiq.learning.profile_repository import ProfileNotFoundError
+from agentiq.learning.unit_of_work import LearningUnitOfWork
 
 
 class ProfileServiceError(Exception):
@@ -32,20 +30,13 @@ class ProfileServiceError(Exception):
 
 
 class LearningProfileService:
-    """Owns learner profile state and evidence-derived skill progression.
-
-    The service is persistence-agnostic and provider-agnostic. It does not
-    call an LLM, select practice problems, generate roadmaps, or retrieve
-    external content.
-    """
+    """Owns learner profile state and evidence-derived skill progression."""
 
     def __init__(
         self,
-        profile_repository: ProfileRepository,
-        evidence_repository: AssessmentEvidenceRepository,
+        unit_of_work_factory: Callable[[], LearningUnitOfWork],
     ) -> None:
-        self._profile_repository = profile_repository
-        self._evidence_repository = evidence_repository
+        self._unit_of_work_factory = unit_of_work_factory
 
     async def create_profile(
         self,
@@ -74,41 +65,44 @@ class LearningProfileService:
             target_timeline=request.target_timeline,
         )
 
-        return await self._profile_repository.save_profile(profile)
+        async with self._unit_of_work_factory() as unit_of_work:
+            return await unit_of_work.profile_repository.save_profile(profile)
 
     async def get_profile(self, profile_id: UUID) -> LearnerProfile:
-        return await self._profile_repository.get_profile(profile_id)
+        async with self._unit_of_work_factory() as unit_of_work:
+            return await unit_of_work.profile_repository.get_profile(profile_id)
 
     async def update_profile(
         self,
         profile_id: UUID,
         request: UpdateProfileRequest,
     ) -> LearnerProfile:
-        profile = await self.get_profile(profile_id)
+        async with self._unit_of_work_factory() as unit_of_work:
+            profile = await unit_of_work.profile_repository.get_profile(profile_id)
 
-        updates = request.model_dump(exclude_unset=True, exclude_none=True)
+            updates = request.model_dump(exclude_unset=True, exclude_none=True)
 
-        if not updates:
-            return profile
+            if not updates:
+                return profile
 
-        if "constraints" in updates:
-            updates["constraints"] = profile.constraints.model_copy(
-                update=updates["constraints"]
+            if "constraints" in updates:
+                updates["constraints"] = profile.constraints.model_copy(
+                    update=updates["constraints"]
+                )
+
+            if "preferences" in updates:
+                updates["preferences"] = profile.preferences.model_copy(
+                    update=updates["preferences"]
+                )
+
+            updated_profile = profile.model_copy(
+                update={
+                    **updates,
+                    "updated_at": utc_now(),
+                }
             )
 
-        if "preferences" in updates:
-            updates["preferences"] = profile.preferences.model_copy(
-                update=updates["preferences"]
-            )
-
-        updated_profile = profile.model_copy(
-            update={
-                **updates,
-                "updated_at": utc_now(),
-            }
-        )
-
-        return await self._profile_repository.update_profile(updated_profile)
+            return await unit_of_work.profile_repository.update_profile(updated_profile)
 
     async def record_assessment(
         self,
@@ -116,53 +110,71 @@ class LearningProfileService:
         assessment_result: AssessmentResult,
         evidence_type: EvidenceType = EvidenceType.CONCEPT_CHECK,
     ) -> AssessmentEvidence:
-        profile = await self.get_profile(profile_id)
+        async with self._unit_of_work_factory() as unit_of_work:
+            profile = await unit_of_work.profile_repository.get_profile(profile_id)
 
-        if assessment_result.profile_id != profile_id:
-            raise ProfileServiceError(
-                "Assessment result does not belong to this learner profile."
+            if assessment_result.profile_id != profile_id:
+                raise ProfileServiceError(
+                    "Assessment result does not belong to this learner profile."
+                )
+
+            existing_evidence = await unit_of_work.evidence_repository.get_evidence_by_assessment_result_id(
+                assessment_result.id
             )
 
-        evidence = AssessmentEvidence(
-            profile_id=profile_id,
-            assessment_result_id=assessment_result.id,
-            topic=assessment_result.topic,
-            evidence_type=evidence_type,
-            score=assessment_result.overall_score,
-            passed=assessment_result.passed,
-            observed_strengths=assessment_result.strengths,
-            observed_gaps=assessment_result.gaps,
-            notes=assessment_result.assessor_notes,
-        )
+            if existing_evidence is not None:
+                if existing_evidence.profile_id != profile_id:
+                    raise ProfileServiceError(
+                        "Assessment result does not belong to this learner profile."
+                    )
 
-        saved_evidence = await self._evidence_repository.save_evidence(evidence)
+                return existing_evidence
 
-        updated_profile = self._apply_assessment_to_profile(
-            profile=profile,
-            assessment_result=assessment_result,
-            evidence=saved_evidence,
-        )
+            evidence = AssessmentEvidence(
+                profile_id=profile_id,
+                assessment_result_id=assessment_result.id,
+                topic=assessment_result.topic,
+                evidence_type=evidence_type,
+                score=assessment_result.overall_score,
+                passed=assessment_result.passed,
+                observed_strengths=assessment_result.strengths,
+                observed_gaps=assessment_result.gaps,
+                notes=assessment_result.assessor_notes,
+            )
 
-        await self._profile_repository.update_profile(updated_profile)
+            saved_evidence = await unit_of_work.evidence_repository.save_evidence(
+                evidence
+            )
 
-        return saved_evidence
+            updated_profile = self._apply_assessment_to_profile(
+                profile=profile,
+                assessment_result=assessment_result,
+                evidence=saved_evidence,
+            )
+
+            await unit_of_work.profile_repository.update_profile(updated_profile)
+
+            return saved_evidence
 
     async def get_evidence(
         self,
         profile_id: UUID,
         evidence_id: UUID,
     ) -> AssessmentEvidence:
-        await self.get_profile(profile_id)
+        async with self._unit_of_work_factory() as unit_of_work:
+            await unit_of_work.profile_repository.get_profile(profile_id)
 
-        try:
-            evidence = await self._evidence_repository.get_evidence(evidence_id)
-        except AssessmentEvidenceNotFoundError as error:
-            raise ProfileNotFoundError("Assessment evidence not found.") from error
+            try:
+                evidence = await unit_of_work.evidence_repository.get_evidence(
+                    evidence_id
+                )
+            except AssessmentEvidenceNotFoundError as error:
+                raise ProfileNotFoundError("Assessment evidence not found.") from error
 
-        if evidence.profile_id != profile_id:
-            raise ProfileNotFoundError("Assessment evidence not found.")
+            if evidence.profile_id != profile_id:
+                raise ProfileNotFoundError("Assessment evidence not found.")
 
-        return evidence
+            return evidence
 
     def _apply_assessment_to_profile(
         self,

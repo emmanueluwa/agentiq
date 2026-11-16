@@ -31,6 +31,13 @@ class AssessmentEvidenceRepository(ABC):
     ) -> AssessmentEvidence:
         """Retrieve assessment evidence by ID."""
 
+    @abstractmethod
+    async def get_evidence_by_assessment_result_id(
+        self,
+        assessment_result_id: UUID,
+    ) -> AssessmentEvidence | None:
+        """Return evidence for an assessment result, or None if it does not exist."""
+
 
 class InMemoryAssessmentEvidenceRepository(AssessmentEvidenceRepository):
     """In-memory evidence persistence for local development and tests."""
@@ -57,3 +64,13 @@ class InMemoryAssessmentEvidenceRepository(AssessmentEvidenceRepository):
             )
 
         return evidence
+
+    async def get_evidence_by_assessment_result_id(
+        self,
+        assessment_result_id: UUID,
+    ) -> AssessmentEvidence | None:
+        for evidence in self._evidence.values():
+            if evidence.assessment_result_id == assessment_result_id:
+                return evidence
+
+        return None

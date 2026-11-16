@@ -23,6 +23,7 @@ from agentiq.learning.profile_repository import (
 from agentiq.learning.profile_service import LearningProfileService
 from agentiq.learning.providers import GrokLearningModelProvider
 from agentiq.learning.skill_graph import SkillGraph
+from agentiq.learning.unit_of_work import InMemoryLearningUnitOfWork
 
 
 @lru_cache
@@ -50,10 +51,16 @@ def get_diagnostic_repository() -> DiagnosticRepository:
 
 
 def get_profile_service() -> LearningProfileService:
-    """Return a profile service backed by shared repositories."""
+    """Return a profile service backed by transactional repositories."""
+
+    def create_unit_of_work() -> InMemoryLearningUnitOfWork:
+        return InMemoryLearningUnitOfWork(
+            profile_repository=get_profile_repository(),
+            evidence_repository=get_assessment_evidence_repository(),
+        )
+
     return LearningProfileService(
-        profile_repository=get_profile_repository(),
-        evidence_repository=get_assessment_evidence_repository(),
+        unit_of_work_factory=create_unit_of_work,
     )
 
 

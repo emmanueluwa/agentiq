@@ -22,7 +22,20 @@ from agentiq.learning.profile_repository import InMemoryProfileRepository
 from agentiq.learning.assessment_evidence_repository import (
     InMemoryAssessmentEvidenceRepository,
 )
+from agentiq.learning.unit_of_work import InMemoryLearningUnitOfWork
 from agentiq.main import app
+
+
+def build_profile_service() -> LearningProfileService:
+    profile_repository = InMemoryProfileRepository()
+    evidence_repository = InMemoryAssessmentEvidenceRepository()
+
+    return LearningProfileService(
+        unit_of_work_factory=lambda: InMemoryLearningUnitOfWork(
+            profile_repository=profile_repository,
+            evidence_repository=evidence_repository,
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -128,10 +141,7 @@ async def test_get_missing_profile_returns_404() -> None:
 
 @pytest.mark.asyncio
 async def test_record_assessment_updates_skill_state() -> None:
-    service = LearningProfileService(
-        profile_repository=InMemoryProfileRepository(),
-        evidence_repository=InMemoryAssessmentEvidenceRepository(),
-    )
+    service = build_profile_service()
 
     profile = await service.create_profile(
         request=type(
@@ -193,10 +203,7 @@ async def test_record_assessment_updates_skill_state() -> None:
 
 @pytest.mark.asyncio
 async def test_repeated_success_marks_skill_proficient() -> None:
-    service = LearningProfileService(
-        profile_repository=InMemoryProfileRepository(),
-        evidence_repository=InMemoryAssessmentEvidenceRepository(),
-    )
+    service = build_profile_service()
 
     profile = await service.create_profile(
         request=type(
@@ -251,10 +258,7 @@ async def test_repeated_success_marks_skill_proficient() -> None:
 
 @pytest.mark.asyncio
 async def test_failed_assessment_does_not_mark_proficient() -> None:
-    service = LearningProfileService(
-        profile_repository=InMemoryProfileRepository(),
-        evidence_repository=InMemoryAssessmentEvidenceRepository(),
-    )
+    service = build_profile_service()
 
     profile = await service.create_profile(
         request=type(
@@ -309,10 +313,7 @@ async def test_failed_assessment_does_not_mark_proficient() -> None:
 
 @pytest.mark.asyncio
 async def test_cannot_record_assessment_for_wrong_profile() -> None:
-    service = LearningProfileService(
-        profile_repository=InMemoryProfileRepository(),
-        evidence_repository=InMemoryAssessmentEvidenceRepository(),
-    )
+    service = build_profile_service()
 
     profile = await service.create_profile(
         request=type(
@@ -359,10 +360,7 @@ async def test_cannot_record_assessment_for_wrong_profile() -> None:
 
 @pytest.mark.asyncio
 async def test_profile_service_raises_for_missing_profile() -> None:
-    service = LearningProfileService(
-        profile_repository=InMemoryProfileRepository(),
-        evidence_repository=InMemoryAssessmentEvidenceRepository(),
-    )
+    service = build_profile_service()
 
     with pytest.raises(ProfileNotFoundError):
         await service.get_profile(uuid4())
