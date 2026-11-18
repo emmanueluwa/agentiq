@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from openai import AsyncOpenAI
 
 from agentiq.config import get_settings
@@ -24,6 +24,17 @@ from agentiq.learning.profile_service import LearningProfileService
 from agentiq.learning.providers import GrokLearningModelProvider
 from agentiq.learning.skill_graph import SkillGraph
 from agentiq.learning.unit_of_work import InMemoryLearningUnitOfWork
+
+from agentiq.learning.database import create_session_factory, create_database_engine
+from agentiq.learning.sql_unit_of_work import (
+    create_sql_unit_of_work_factory,
+)
+
+
+def get_database_engine():
+    """Return the application database engine."""
+
+    return create_database_engine()
 
 
 @lru_cache
@@ -50,17 +61,19 @@ def get_diagnostic_repository() -> DiagnosticRepository:
     return InMemoryDiagnosticRepository()
 
 
-def get_profile_service() -> LearningProfileService:
-    """Return a profile service backed by transactional repositories."""
+def get_session_factory():
+    """Return the application database session factory."""
 
-    def create_unit_of_work() -> InMemoryLearningUnitOfWork:
-        return InMemoryLearningUnitOfWork(
-            profile_repository=get_profile_repository(),
-            evidence_repository=get_assessment_evidence_repository(),
-        )
+    return create_session_factory(get_database_engine())
+
+
+def get_profile_service(request: Request) -> LearningProfileService:
+    """Return a profile service backed by PostgreSQL."""
+
+    session_factory = request.app.state.session_factory
 
     return LearningProfileService(
-        unit_of_work_factory=create_unit_of_work,
+        unit_of_work_factory=create_sql_unit_of_work_factory(session_factory)
     )
 
 

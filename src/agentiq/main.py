@@ -1,14 +1,33 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
 from agentiq.api.routes import router
 from agentiq.config import get_settings
 from agentiq.logging import configure_logging
 from agentiq.api.routes_learning import router as learning_router
+from agentiq.learning.database import (
+    create_database_engine,
+    create_session_factory,
+)
 
 configure_logging()
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    engine = create_database_engine()
+    session_factory = create_session_factory(engine)
+
+    app.state.database_engine = engine
+    app.state.session_factory = session_factory
+
+    yield
+
+    await engine.dispose()
+
 
 app = FastAPI(
     title="AgentIQ",

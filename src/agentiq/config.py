@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+import os
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +13,11 @@ class Settings(BaseSettings):
         env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+    )
+
+    database_url: str = Field(
+        default=os.getenv("DATABASE_URL"),
+        alias="DATABASE_URL",
     )
 
     grok_api_key: str | None = Field(default=None, alias="GROK_API_KEY")
@@ -33,3 +39,6 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+settings = Settings()

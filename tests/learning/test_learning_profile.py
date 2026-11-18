@@ -17,6 +17,7 @@ from agentiq.learning.profile_service import (
     ProfileNotFoundError,
     ProfileServiceError,
 )
+from agentiq.learning.dependencies import get_profile_service
 
 from agentiq.learning.profile_repository import InMemoryProfileRepository
 from agentiq.learning.assessment_evidence_repository import (
@@ -24,6 +25,25 @@ from agentiq.learning.assessment_evidence_repository import (
 )
 from agentiq.learning.unit_of_work import InMemoryLearningUnitOfWork
 from agentiq.main import app
+
+
+@pytest.fixture(autouse=True)
+def override_profile_service():
+    profile_repository = InMemoryProfileRepository()
+    evidence_repository = InMemoryAssessmentEvidenceRepository()
+
+    service = LearningProfileService(
+        unit_of_work_factory=lambda: InMemoryLearningUnitOfWork(
+            profile_repository=profile_repository,
+            evidence_repository=evidence_repository,
+        )
+    )
+
+    app.dependency_overrides[get_profile_service] = lambda: service
+
+    yield
+
+    app.dependency_overrides.clear()
 
 
 def build_profile_service() -> LearningProfileService:
