@@ -24,6 +24,18 @@ def create_database_engine() -> AsyncEngine:
     )
 
 
+def create_database_engine_with_url(database_url: str) -> AsyncEngine:
+    """Create a database engine for an explicit PostgreSQL URL."""
+
+    return create_async_engine(
+        database_url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10,
+        pool_recycle=1800,
+    )
+
+
 def create_session_factory(
     engine: AsyncEngine,
 ) -> async_sessionmaker[AsyncSession]:

@@ -59,7 +59,9 @@ class SqlProfileRepository(ProfileRepository):
         if record is None:
             raise ProfileNotFoundError(f"Learner profile not found: {profile_id}")
 
-        return LearnerProfile.model_validate_json(record.profile_data)
+        profile = LearnerProfile.model_validate_json(record.profile_data)
+
+        return profile.model_copy(update={"version": record.version})
 
     async def update_profile(
         self,
@@ -76,13 +78,16 @@ class SqlProfileRepository(ProfileRepository):
                 "Learner profile was modified by another operation."
             )
 
-        record.version = expected_version + 1
-        record.profile_data = profile.model_dump_json()
+        next_version = expected_version + 1
+        persisted_profile = profile.model_copy(update={"version": next_version})
+
+        record.version = next_version
+        record.profile_data = persisted_profile.model_dump_json()
         record.updated_at = profile.updated_at
 
         await self._session.flush()
 
-        return profile.model_copy(update={"version": record.version})
+        return persisted_profile
 
     async def delete_profile(
         self,

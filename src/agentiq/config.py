@@ -15,6 +15,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    test_database_url: str | None = Field(
+        default=None,
+        alias="TEST_DATABASE_URL",
+    )
+
     database_url: str = Field(
         default=os.getenv("DATABASE_URL"),
         alias="DATABASE_URL",
