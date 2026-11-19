@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Annotated
 
@@ -23,7 +24,8 @@ from agentiq.learning.profile_repository import (
 from agentiq.learning.profile_service import LearningProfileService
 from agentiq.learning.providers import GrokLearningModelProvider
 from agentiq.learning.skill_graph import SkillGraph
-from agentiq.learning.unit_of_work import InMemoryLearningUnitOfWork
+
+from agentiq.learning.profile_service import LearningProfileService
 
 from agentiq.learning.database import create_session_factory, create_database_engine
 from agentiq.learning.sql_unit_of_work import (
