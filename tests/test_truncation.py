@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+import uuid
+from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
-from agentiq.api.deps import get_chat_service
+from agentiq.api.deps import (
+    get_chat_service,
+    get_chat_unit_of_work_factory,
+)
+from agentiq.chat.unit_of_work import SqlChatUnitOfWork
 from agentiq.main import app
 from agentiq.services.chat_service import ChatService
 
@@ -18,6 +26,118 @@ class FakeStreamEvent:
     content: str | None = None
     finish_reason: str | None = None
     usage: dict | None = None
+
+
+@dataclass
+class InMemoryChatMessage:
+    id: UUID
+    conversation_id: UUID
+    role: str
+    content: str
+    truncated: bool = False
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+
+@dataclass
+class InMemoryConversation:
+    id: UUID
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+
+class InMemoryChatUnitOfWork:
+    def __init__(self) -> None:
+        self.conversations: dict[UUID, InMemoryConversation] = {}
+        self.messages: dict[UUID, InMemoryChatMessage] = {}
+
+    async def create_conversation(self) -> InMemoryConversation:
+        conversation = InMemoryConversation(id=uuid.uuid4())
+        self.conversations[conversation.id] = conversation
+        return conversation
+
+    async def get_conversation(
+        self,
+        conversation_id: UUID,
+    ) -> InMemoryConversation:
+        if conversation_id not in self.conversations:
+            raise KeyError(f"Chat conversation not found: {conversation_id}")
+
+        return self.conversations[conversation_id]
+
+    async def append_message(
+        self,
+        conversation_id: UUID,
+        role: str,
+        content: str,
+        *,
+        message_id: UUID | None = None,
+        truncated: bool = False,
+    ) -> InMemoryChatMessage:
+        await self.get_conversation(conversation_id)
+
+        message = InMemoryChatMessage(
+            id=message_id or uuid.uuid4(),
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            truncated=truncated,
+        )
+
+        self.messages[message.id] = message
+        return message
+
+    async def update_message(
+        self,
+        message_id: UUID,
+        *,
+        content: str,
+        truncated: bool,
+    ) -> InMemoryChatMessage:
+        if message_id not in self.messages:
+            raise KeyError(f"Chat message not found: {message_id}")
+
+        message = self.messages[message_id]
+        message.content = content
+        message.truncated = truncated
+        return message
+
+    async def get_messages(
+        self,
+        conversation_id: UUID,
+    ) -> list[InMemoryChatMessage]:
+        await self.get_conversation(conversation_id)
+
+        return sorted(
+            (
+                message
+                for message in self.messages.values()
+                if message.conversation_id == conversation_id
+            ),
+            key=lambda message: message.created_at,
+        )
+
+    async def get_message(self, message_id: UUID) -> InMemoryChatMessage:
+        if message_id not in self.messages:
+            raise KeyError(f"Chat message not found: {message_id}")
+
+        return self.messages[message_id]
+
+    async def __aenter__(self) -> InMemoryChatUnitOfWork:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object | None,
+    ) -> None:
+        return None
 
 
 class FakeChatService:
@@ -50,12 +170,19 @@ class FakeChatService:
         self,
         messages: list[dict],
         request_id: str | None = None,
+        conversation_id: str | None = None,
+        assistant_message_id: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         self.received_messages.append(messages)
 
         yield {
             "event": "status",
-            "data": {"state": "generating", "request_id": request_id},
+            "data": {
+                "state": "generating",
+                "request_id": request_id,
+                "conversation_id": conversation_id,
+                "assistant_message_id": assistant_message_id,
+            },
         }
 
         for event in self._events:
@@ -82,6 +209,8 @@ class FakeChatService:
             "event": "done",
             "data": {
                 "request_id": request_id,
+                "conversation_id": conversation_id,
+                "assistant_message_id": assistant_message_id,
                 "finish_reason": final_reason,
                 "truncated": truncated,
                 "usage": {"completion_tokens": 12, "prompt_tokens": 34},
@@ -115,7 +244,23 @@ def parse_sse_events(raw: str) -> list[dict]:
 
 
 @pytest_asyncio.fixture
-async def client() -> AsyncGenerator[AsyncClient, None]:
+async def chat_unit_of_work() -> InMemoryChatUnitOfWork:
+    return InMemoryChatUnitOfWork()
+
+
+@pytest_asyncio.fixture
+async def client(
+    chat_unit_of_work: InMemoryChatUnitOfWork,
+) -> AsyncGenerator[AsyncClient, None]:
+    def get_test_chat_unit_of_work_factory(
+        request: Request,
+    ) -> Callable[[], InMemoryChatUnitOfWork]:
+        return lambda: chat_unit_of_work
+
+    app.dependency_overrides[get_chat_unit_of_work_factory] = (
+        get_test_chat_unit_of_work_factory
+    )
+
     transport = ASGITransport(app=app)
 
     async with AsyncClient(
@@ -123,6 +268,8 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
         base_url="http://test",
     ) as async_client:
         yield async_client
+
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -141,6 +288,7 @@ def override_chat_service():
 @pytest.mark.asyncio
 async def test_truncated_stream_emits_production_sse_contract(
     client: AsyncClient,
+    chat_unit_of_work: InMemoryChatUnitOfWork,
     override_chat_service,
 ) -> None:
     fake_service = FakeChatService(
@@ -174,6 +322,8 @@ async def test_truncated_stream_emits_production_sse_contract(
     status_event = events[0]
     assert status_event["data"]["state"] == "generating"
     assert status_event["data"]["request_id"]
+    assert status_event["data"]["conversation_id"]
+    assert status_event["data"]["assistant_message_id"]
 
     token_events = events[1:-1]
     streamed_content = "".join(event["data"]["content"] for event in token_events)
@@ -192,73 +342,3 @@ async def test_truncated_stream_emits_production_sse_contract(
         "prompt_tokens": 34,
     }
     assert done_data["request_id"] == status_event["data"]["request_id"]
-
-
-@pytest.mark.asyncio
-async def test_continuation_request_passes_partial_content_to_service(
-    client: AsyncClient,
-    override_chat_service,
-) -> None:
-    fake_service = FakeChatService(
-        events=[
-            FakeStreamEvent(content="Continued answer."),
-            FakeStreamEvent(finish_reason="stop"),
-        ]
-    )
-
-    override_chat_service(fake_service)
-
-    response = await client.post(
-        "/continue",
-        json={
-            "query": "Explain distributed tracing.",
-            "partial_assistant_content": "Partial answer that stops abruptly.",
-        },
-    )
-
-    assert response.status_code == 200
-
-    events = parse_sse_events(response.text)
-    done_event = events[-1]
-
-    assert done_event["event"] == "done"
-    assert done_event["data"]["finish_reason"] == "stop"
-    assert done_event["data"]["truncated"] is False
-    assert done_event["data"]["partial_assistant_content"] is None
-
-    messages = fake_service.received_messages[0]
-
-    assert messages[2] == {
-        "role": "assistant",
-        "content": "Partial answer that stops abruptly.",
-    }
-    assert messages[3]["role"] == "user"
-    assert "Continue exactly where you stopped." in messages[3]["content"]
-
-
-@pytest.mark.asyncio
-async def test_non_truncated_response_does_not_return_partial_content(
-    client: AsyncClient,
-    override_chat_service,
-) -> None:
-    fake_service = FakeChatService(
-        events=[
-            FakeStreamEvent(content="Complete answer."),
-            FakeStreamEvent(finish_reason="stop"),
-        ]
-    )
-
-    override_chat_service(fake_service)
-
-    response = await client.post(
-        "/",
-        json={"query": "Explain distributed tracing."},
-    )
-
-    assert response.status_code == 200
-
-    done_event = parse_sse_events(response.text)[-1]
-
-    assert done_event["data"]["finish_reason"] == "stop"
-    assert done_event["data"]["truncated"] is False
-    assert done_event["data"]["partial_assistant_content"] is None

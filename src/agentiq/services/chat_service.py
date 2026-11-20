@@ -183,6 +183,8 @@ class ChatService:
         self,
         messages: list[dict],
         request_id: str | None = None,
+        conversation_id: str | None = None,
+        assistant_message_id: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         request_id = request_id or str(uuid.uuid4())
         context = {
@@ -197,6 +199,8 @@ class ChatService:
             "data": {
                 "state": "generating",
                 "request_id": request_id,
+                "conversation_id": conversation_id,
+                "assistant_message_id": assistant_message_id,
             },
         }
 
@@ -340,6 +344,8 @@ class ChatService:
             "event": "done",
             "data": {
                 "request_id": request_id,
+                "conversation_id": conversation_id,
+                "assistant_message_id": assistant_message_id,
                 "finish_reason": finish_reason,
                 "truncated": truncated,
                 "usage": usage,
