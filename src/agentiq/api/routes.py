@@ -148,8 +148,42 @@ async def continue_chat(
                 detail="Message does not belong to the conversation.",
             )
 
+        conversation_messages = await unit_of_work.get_messages(
+            body.conversation_id,
+        )
+
+        assistant_message_index = next(
+            (
+                index
+                for index, message in enumerate(conversation_messages)
+                if message.id == assistant_message.id
+            ),
+            None,
+        )
+
+        if assistant_message_index is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Message does not belong to the conversation.",
+            )
+
+        preceding_user_message = next(
+            (
+                message
+                for message in reversed(conversation_messages[:assistant_message_index])
+                if message.role == "user"
+            ),
+            None,
+        )
+
+        if preceding_user_message is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No user message precedes the truncated assistant message.",
+            )
+
         messages = chat_service.build_continuation_messages(
-            query=body.query,
+            query=preceding_user_message.content,
             partial_assistant_content=assistant_message.content,
         )
 

@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
+from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 
 from agentiq.api.deps import get_chat_service
@@ -38,13 +39,14 @@ async def low_token_client() -> AsyncGenerator[AsyncClient, None]:
 
     app.dependency_overrides[get_chat_service] = get_constrained_chat_service
 
-    transport = ASGITransport(app=app)
+    async with LifespanManager(app) as lifespan:
+        transport = ASGITransport(app=app)
 
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://test",
-    ) as client:
-        yield client
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            yield client
 
     app.dependency_overrides.clear()
 
@@ -101,15 +103,15 @@ async def test_long_response_is_truncated_and_can_be_continued(
     assert partial_content
     assert len(partial_content.split()) > 20
 
+    status_event = next(event for event in events if event["event"] == "status")
+    conversation_id = status_event["data"]["conversation_id"]
+    assistant_message_id = status_event["data"]["assistant_message_id"]
+
     continuation_response = await low_token_client.post(
         "/continue",
         json={
-            "query": (
-                "Write a comprehensive production guide to building RAG "
-                "systems, including retrieval, evaluation, observability, "
-                "cost control, and go-to-market strategy."
-            ),
-            "partial_assistant_content": partial_content,
+            "conversation_id": conversation_id,
+            "assistant_message_id": assistant_message_id,
         },
     )
 

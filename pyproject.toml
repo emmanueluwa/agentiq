@@ -26,6 +26,7 @@ packages = ["src/agentiq"]
 
 [dependency-groups]
 dev = [
+    "asgi-lifespan>=2.1.0",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.4.1.post1",
 ]

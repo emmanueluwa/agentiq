@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 
 from agentiq.main import app
@@ -119,13 +120,14 @@ def assert_deterministic_criteria(
 
 @pytest_asyncio.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
-    transport = ASGITransport(app=app)
+    async with LifespanManager(app) as lifespan:
+        transport = ASGITransport(app=app)
 
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://test",
-    ) as async_client:
-        yield async_client
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as async_client:
+            yield async_client
 
 
 @pytest.mark.asyncio
