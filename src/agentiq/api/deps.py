@@ -10,6 +10,10 @@ from agentiq.chat.unit_of_work import (
     SqlChatUnitOfWork,
     create_chat_unit_of_work_factory,
 )
+from agentiq.plans.unit_of_work import (
+    SqlPlanUnitOfWork,
+    create_plan_unit_of_work_factory,
+)
 from agentiq.config import Settings, get_settings
 from agentiq.providers.grok import GrokProvider
 from agentiq.services.chat_service import ChatService
@@ -40,3 +44,11 @@ def get_chat_unit_of_work_factory(
     session_factory = request.app.state.session_factory
 
     return create_chat_unit_of_work_factory(session_factory)
+
+
+def get_plan_unit_of_work_factory(
+    request: Request,
+) -> Callable[[], SqlPlanUnitOfWork]:
+    session_factory = request.app.state.session_factory
+
+    return create_plan_unit_of_work_factory(session_factory)

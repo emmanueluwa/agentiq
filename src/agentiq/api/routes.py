@@ -11,14 +11,24 @@ from fastapi.responses import StreamingResponse
 from agentiq.api.deps import (
     get_chat_service,
     get_chat_unit_of_work_factory,
+    get_plan_unit_of_work_factory,
     get_request_id,
 )
 from agentiq.chat.repository import ConversationNotFoundError
 from agentiq.chat.unit_of_work import SqlChatUnitOfWork
+from agentiq.plans.repository import (
+    PlanItemNotFoundError,
+    PlanNotFoundError,
+)
+from agentiq.plans.unit_of_work import SqlPlanUnitOfWork
 from agentiq.schemas import (
     ChatConversationResponse,
     ChatMessageResponse,
     ContinueRequest,
+    PlanCreate,
+    PlanItemResponse,
+    PlanItemUpdate,
+    PlanResponse,
     QueryRequest,
 )
 from agentiq.services.chat_service import ChatService
@@ -31,7 +41,8 @@ def sse_event(event: str, data: dict) -> str:
 
 
 def streaming_response(
-    events: AsyncGenerator[dict, None], request_id: str
+    events: AsyncGenerator[dict, None],
+    request_id: str,
 ) -> StreamingResponse:
     async def generate():
         async for event in events:
@@ -134,7 +145,7 @@ async def continue_chat(
         try:
             await unit_of_work.get_conversation(body.conversation_id)
             assistant_message = await unit_of_work.get_message(
-                body.assistant_message_id
+                body.assistant_message_id,
             )
         except ConversationNotFoundError as error:
             raise HTTPException(
@@ -179,7 +190,7 @@ async def continue_chat(
         if preceding_user_message is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No user message precedes the truncated assistant message.",
+                detail=("No user message precedes the truncated assistant message."),
             )
 
         messages = chat_service.build_continuation_messages(
@@ -256,3 +267,136 @@ async def get_conversation(
             for message in messages
         ],
     )
+
+
+def serialize_plan(plan: object) -> PlanResponse:
+    return PlanResponse(
+        id=plan.id,
+        conversation_id=plan.conversation_id,
+        source_message_id=plan.source_message_id,
+        title=plan.title,
+        outcome=plan.outcome,
+        status=plan.status,
+        items=[
+            PlanItemResponse(
+                id=item.id,
+                title=item.title,
+                details=item.details,
+                status=item.status,
+                position=item.position,
+                due_at=item.due_at,
+            )
+            for item in plan.items
+        ],
+    )
+
+
+@router.post("/plans", status_code=status.HTTP_201_CREATED)
+async def create_plan(
+    body: PlanCreate,
+    chat_unit_of_work_factory: Callable[[], SqlChatUnitOfWork] = Depends(
+        get_chat_unit_of_work_factory,
+    ),
+    plan_unit_of_work_factory: Callable[[], SqlPlanUnitOfWork] = Depends(
+        get_plan_unit_of_work_factory,
+    ),
+) -> PlanResponse:
+    async with chat_unit_of_work_factory() as chat_unit_of_work:
+        try:
+            await chat_unit_of_work.get_conversation(body.conversation_id)
+            source_message = await chat_unit_of_work.get_message(
+                body.source_message_id,
+            )
+        except ConversationNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+
+        if source_message.conversation_id != body.conversation_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Message does not belong to the conversation.",
+            )
+
+    async with plan_unit_of_work_factory() as plan_unit_of_work:
+        plan = await plan_unit_of_work.create_plan(
+            conversation_id=body.conversation_id,
+            source_message_id=body.source_message_id,
+            title=body.title,
+            outcome=body.outcome,
+            items=[item.model_dump() for item in body.items],
+        )
+
+    return serialize_plan(plan)
+
+
+@router.get("/plans/{plan_id}")
+async def get_plan(
+    plan_id: UUID,
+    plan_unit_of_work_factory: Callable[[], SqlPlanUnitOfWork] = Depends(
+        get_plan_unit_of_work_factory,
+    ),
+) -> PlanResponse:
+    async with plan_unit_of_work_factory() as plan_unit_of_work:
+        try:
+            plan = await plan_unit_of_work.get_plan(plan_id)
+        except PlanNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+
+    return serialize_plan(plan)
+
+
+@router.patch("/plans/{plan_id}/items/{item_id}")
+async def update_plan_item(
+    plan_id: UUID,
+    item_id: UUID,
+    body: PlanItemUpdate,
+    plan_unit_of_work_factory: Callable[[], SqlPlanUnitOfWork] = Depends(
+        get_plan_unit_of_work_factory,
+    ),
+) -> PlanItemResponse:
+    async with plan_unit_of_work_factory() as plan_unit_of_work:
+        try:
+            item = await plan_unit_of_work.update_plan_item(
+                plan_id=plan_id,
+                item_id=item_id,
+                status=body.status,
+                title=body.title,
+                details=body.details,
+                due_at=body.due_at,
+            )
+        except (PlanNotFoundError, PlanItemNotFoundError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+
+    return PlanItemResponse(
+        id=item.id,
+        title=item.title,
+        details=item.details,
+        status=item.status,
+        position=item.position,
+        due_at=item.due_at,
+    )
+
+
+@router.delete("/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_plan(
+    plan_id: UUID,
+    plan_unit_of_work_factory: Callable[[], SqlPlanUnitOfWork] = Depends(
+        get_plan_unit_of_work_factory,
+    ),
+) -> None:
+    async with plan_unit_of_work_factory() as plan_unit_of_work:
+        try:
+            await plan_unit_of_work.delete_plan(plan_id)
+        except PlanNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error

@@ -17,3 +17,4 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 
 CREATE INDEX IF NOT EXISTS ix_chat_messages_conversation_id
     ON chat_messages(conversation_id);
+
