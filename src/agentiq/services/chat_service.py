@@ -1,5 +1,6 @@
 import asyncio
 import random
+import json
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -138,6 +139,36 @@ Do not provide harmful, illegal, deceptive, or unsafe guidance.
 - Encourage strong engineering judgment and commercial thinking.
 - End complex answers with a clear next action.
 """
+
+PLAN_DRAFT_SYSTEM_PROMPT = """
+You convert an assistant response into a concise, actionable plan.
+
+Return only valid JSON. Do not include Markdown, explanations, or code fences.
+
+Use this exact JSON structure:
+{
+  "title": "Short outcome-oriented plan title",
+  "outcome": "One sentence describing the measurable end state",
+  "items": [
+    {
+      "title": "Concrete action starting with a verb",
+      "details": "One or two sentences explaining how to complete it"
+    }
+  ]
+}
+
+Rules:
+- Create 3 to 7 items.
+- Each item must be independently actionable.
+- Do not invent deadlines, owners, costs, metrics, or external facts.
+- Preserve only actions supported by the source response.
+- Prefer the smallest useful next actions.
+- Do not include generic advice such as "research more" without a concrete output.
+"""
+
+
+class PlanDraftGenerationError(Exception):
+    """Raised when a plan draft cannot be generated or parsed."""
 
 
 class ChatService:
@@ -351,4 +382,107 @@ class ChatService:
                 "usage": usage,
                 "partial_assistant_content": (assistant_content if truncated else None),
             },
+        }
+
+    async def create_plan_draft(
+        self,
+        source_message: str,
+    ) -> dict:
+        messages = [
+            {
+                "role": "system",
+                "content": PLAN_DRAFT_SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Convert the following assistant response into an "
+                    "actionable plan.\n\n"
+                    f"Assistant response:\n{source_message}"
+                ),
+            },
+        ]
+
+        content_parts: list[str] = []
+
+        async for event in self._provider.stream_completion(
+            messages=messages,
+            max_completion_tokens=self._settings.max_completion_tokens,
+        ):
+            if event.content:
+                content_parts.append(event.content)
+
+        raw_response = "".join(content_parts).strip()
+
+        if not raw_response:
+            raise PlanDraftGenerationError(
+                "The AI service returned an empty plan draft."
+            )
+
+        json_start = raw_response.find("{")
+        json_end = raw_response.rfind("}")
+
+        if json_start == -1 or json_end == -1:
+            raise PlanDraftGenerationError(
+                "The AI service returned an invalid plan draft."
+            )
+
+        try:
+            draft = json.loads(raw_response[json_start : json_end + 1])
+        except json.JSONDecodeError as error:
+            raise PlanDraftGenerationError(
+                "The AI service returned an invalid plan draft."
+            ) from error
+
+        if not isinstance(draft, dict):
+            raise PlanDraftGenerationError(
+                "The AI service returned an invalid plan draft."
+            )
+
+        title = draft.get("title")
+        outcome = draft.get("outcome")
+        items = draft.get("items")
+
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(outcome, str)
+            or not outcome.strip()
+            or not isinstance(items, list)
+            or not 1 <= len(items) <= 10
+        ):
+            raise PlanDraftGenerationError(
+                "The AI service returned an incomplete plan draft."
+            )
+
+        cleaned_items: list[dict] = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            item_title = item.get("title")
+            item_details = item.get("details", "")
+
+            if not isinstance(item_title, str) or not item_title.strip():
+                continue
+
+            cleaned_items.append(
+                {
+                    "title": item_title.strip(),
+                    "details": (
+                        item_details.strip() if isinstance(item_details, str) else ""
+                    ),
+                }
+            )
+
+        if not cleaned_items:
+            raise PlanDraftGenerationError(
+                "The AI service returned no valid plan actions."
+            )
+
+        return {
+            "title": title.strip(),
+            "outcome": outcome.strip(),
+            "items": cleaned_items,
         }

@@ -3,11 +3,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentiq.plans.repository import PlanRepository
 from agentiq.plans.sql_models import PlanItemRecord, PlanRecord
+from agentiq.plans.repository import (
+    PlanNotFoundError,
+)
 
 
 class SqlPlanUnitOfWork:
@@ -26,7 +31,7 @@ class SqlPlanUnitOfWork:
         outcome: str,
         items: list[dict],
     ) -> PlanRecord:
-        return await self._repository.create_plan(
+        plan = await self._repository.create_plan(
             conversation_id=conversation_id,
             source_message_id=source_message_id,
             title=title,
@@ -34,8 +39,29 @@ class SqlPlanUnitOfWork:
             items=items,
         )
 
+        statement = (
+            select(PlanRecord)
+            .options(selectinload(PlanRecord.items))
+            .where(PlanRecord.id == plan.id)
+        )
+
+        result = await self._session.execute(statement)
+        return result.scalar_one()
+
     async def get_plan(self, plan_id: UUID) -> PlanRecord:
-        return await self._repository.get_plan(plan_id)
+        statement = (
+            select(PlanRecord)
+            .options(selectinload(PlanRecord.items))
+            .where(PlanRecord.id == plan_id)
+        )
+
+        result = await self._session.execute(statement)
+        plan = result.scalar_one_or_none()
+
+        if plan is None:
+            raise PlanNotFoundError(f"Plan {plan_id} was not found.")
+
+        return plan
 
     async def list_plans(self) -> list[PlanRecord]:
         return await self._repository.list_plans()

@@ -66,3 +66,19 @@ class PlanResponse(BaseModel):
     outcome: str
     status: str
     items: list[PlanItemResponse]
+
+
+class PlanDraftRequest(BaseModel):
+    conversation_id: UUID
+    source_message_id: UUID
+
+
+class PlanDraftItem(BaseModel):
+    title: str
+    details: str = ""
+
+
+class PlanDraftResponse(BaseModel):
+    title: str
+    outcome: str
+    items: list[PlanDraftItem]

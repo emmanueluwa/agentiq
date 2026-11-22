@@ -26,12 +26,14 @@ from agentiq.schemas import (
     ChatMessageResponse,
     ContinueRequest,
     PlanCreate,
+    PlanDraftRequest,
+    PlanDraftResponse,
     PlanItemResponse,
     PlanItemUpdate,
     PlanResponse,
     QueryRequest,
 )
-from agentiq.services.chat_service import ChatService
+from agentiq.services.chat_service import ChatService, PlanDraftGenerationError
 
 router = APIRouter()
 
@@ -291,6 +293,45 @@ def serialize_plan(plan: object) -> PlanResponse:
     )
 
 
+@router.post("/plans/drafts")
+async def create_plan_draft(
+    body: PlanDraftRequest,
+    chat_service: ChatService = Depends(get_chat_service),
+    chat_unit_of_work_factory: Callable[[], SqlChatUnitOfWork] = Depends(
+        get_chat_unit_of_work_factory,
+    ),
+) -> PlanDraftResponse:
+    async with chat_unit_of_work_factory() as chat_unit_of_work:
+        try:
+            await chat_unit_of_work.get_conversation(body.conversation_id)
+            source_message = await chat_unit_of_work.get_message(
+                body.source_message_id,
+            )
+        except ConversationNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+
+        if source_message.conversation_id != body.conversation_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Message does not belong to the conversation.",
+            )
+
+    try:
+        draft = await chat_service.create_plan_draft(
+            source_message=source_message.content,
+        )
+    except PlanDraftGenerationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(error),
+        ) from error
+
+    return PlanDraftResponse(**draft)
+
+
 @router.post("/plans", status_code=status.HTTP_201_CREATED)
 async def create_plan(
     body: PlanCreate,
@@ -328,7 +369,7 @@ async def create_plan(
             items=[item.model_dump() for item in body.items],
         )
 
-    return serialize_plan(plan)
+        return serialize_plan(plan)
 
 
 @router.get("/plans/{plan_id}")
@@ -347,7 +388,7 @@ async def get_plan(
                 detail=str(error),
             ) from error
 
-    return serialize_plan(plan)
+        return serialize_plan(plan)
 
 
 @router.patch("/plans/{plan_id}/items/{item_id}")
@@ -400,3 +441,36 @@ async def delete_plan(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=str(error),
             ) from error
+
+
+@router.post("/plans/drafts")
+async def create_plan_draft(
+    body: PlanDraftRequest,
+    chat_service: ChatService = Depends(get_chat_service),
+    chat_unit_of_work_factory: Callable[[], SqlChatUnitOfWork] = Depends(
+        get_chat_unit_of_work_factory,
+    ),
+) -> PlanDraftResponse:
+    async with chat_unit_of_work_factory() as chat_unit_of_work:
+        try:
+            await chat_unit_of_work.get_conversation(body.conversation_id)
+            source_message = await chat_unit_of_work.get_message(
+                body.source_message_id,
+            )
+        except ConversationNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+
+        if source_message.conversation_id != body.conversation_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Message does not belong to the conversation.",
+            )
+
+    draft = await chat_service.create_plan_draft(
+        source_message=source_message.content,
+    )
+
+    return draft
