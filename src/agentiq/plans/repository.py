@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentiq.plans.sql_models import PlanItemRecord, PlanRecord
@@ -70,7 +71,14 @@ class PlanRepository:
         return plan
 
     async def get_plan(self, plan_id: UUID) -> PlanRecord:
-        plan = await self._session.get(PlanRecord, plan_id)
+        statement = (
+            select(PlanRecord)
+            .options(selectinload(PlanRecord.items))
+            .where(PlanRecord.id == plan_id)
+        )
+
+        result = await self._session.execute(statement)
+        plan = result.scalar_one_or_none()
 
         if plan is None:
             raise PlanNotFoundError(f"Plan not found: {plan_id}")
