@@ -372,6 +372,18 @@ async def create_plan(
         return serialize_plan(plan)
 
 
+@router.get("/plans")
+async def list_plans(
+    plan_unit_of_work_factory: Callable[[], SqlPlanUnitOfWork] = Depends(
+        get_plan_unit_of_work_factory,
+    ),
+) -> list[PlanResponse]:
+    async with plan_unit_of_work_factory() as plan_unit_of_work:
+        plans = await plan_unit_of_work.list_plans()
+
+        return [serialize_plan(plan) for plan in plans]
+
+
 @router.get("/plans/{plan_id}")
 async def get_plan(
     plan_id: UUID,

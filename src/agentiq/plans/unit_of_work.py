@@ -64,7 +64,14 @@ class SqlPlanUnitOfWork:
         return plan
 
     async def list_plans(self) -> list[PlanRecord]:
-        return await self._repository.list_plans()
+        statement = (
+            select(PlanRecord)
+            .options(selectinload(PlanRecord.items))
+            .order_by(PlanRecord.created_at.desc())
+        )
+
+        result = await self._session.execute(statement)
+        return list(result.scalars().all())
 
     async def update_plan_item(
         self,

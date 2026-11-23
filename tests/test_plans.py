@@ -159,6 +159,9 @@ class InMemoryPlanUnitOfWork:
 
         return self.plans[plan_id]
 
+    async def list_plans(self) -> list[InMemoryPlan]:
+        return list(self.plans.values())
+
     async def update_plan_item(
         self,
         plan_id: UUID,
@@ -359,6 +362,55 @@ async def test_get_plan_returns_items_in_position_order(
         "Define the first prototype",
     ]
     assert [item["position"] for item in plan["items"]] == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_list_plans_returns_created_plans(
+    client: AsyncClient,
+    chat_unit_of_work: InMemoryChatUnitOfWork,
+    plan_unit_of_work: InMemoryPlanUnitOfWork,
+) -> None:
+    conversation_id, source_message_id = await create_source_message(
+        chat_unit_of_work,
+    )
+
+    first_response = await client.post(
+        "/plans",
+        json={
+            "conversation_id": str(conversation_id),
+            "source_message_id": str(source_message_id),
+            "title": "First plan",
+            "outcome": "First outcome.",
+            "items": [
+                {"title": "First action"},
+            ],
+        },
+    )
+
+    second_response = await client.post(
+        "/plans",
+        json={
+            "conversation_id": str(conversation_id),
+            "source_message_id": str(source_message_id),
+            "title": "Second plan",
+            "outcome": "Second outcome.",
+            "items": [
+                {"title": "Second action"},
+            ],
+        },
+    )
+
+    response = await client.get("/plans")
+
+    assert response.status_code == 200
+
+    plans = response.json()
+    plan_titles = [plan["title"] for plan in plans]
+
+    assert len(plans) == 2
+    assert "First plan" in plan_titles
+    assert "Second plan" in plan_titles
+    assert all(plan["items"] for plan in plans)
 
 
 @pytest.mark.asyncio
