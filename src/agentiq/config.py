@@ -35,6 +35,31 @@ class Settings(BaseSettings):
     max_completion_tokens: int = Field(default=4096, alias="MAX_COMPLETION_TOKENS")
     max_retries: int = Field(default=3, alias="MAX_RETRIES")
 
+    exa_api_key: str | None = Field(
+        default=None,
+        alias="EXA_API_KEY",
+    )
+
+    exa_base_url: str = Field(
+        default="https://api.exa.ai",
+        alias="EXA_BASE_URL",
+    )
+
+    research_max_results: int = Field(
+        default=8,
+        alias="RESEARCH_MAX_RESULTS",
+    )
+
+    research_min_results: int = Field(
+        default=2,
+        alias="RESEARCH_MIN_RESULTS",
+    )
+
+    research_request_timeout_seconds: float = Field(
+        default=20.0,
+        alias="RESEARCH_REQUEST_TIMEOUT_SECONDS",
+    )
+
     frontend_origin: str = Field(
         default="http://localhost:5173",
         alias="FRONTEND_ORIGIN",

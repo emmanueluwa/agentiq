@@ -35,6 +35,10 @@ from agentiq.schemas import (
 )
 from agentiq.services.chat_service import ChatService, PlanDraftGenerationError
 
+from agentiq.research.dependencies import get_research_service
+from agentiq.research.models import ResearchPreparationError
+from agentiq.research.service import ResearchService
+
 router = APIRouter()
 
 
@@ -67,6 +71,7 @@ async def chat(
     request: Request,
     request_id: str = Depends(get_request_id),
     chat_service: ChatService = Depends(get_chat_service),
+    research_service: ResearchService = Depends(get_research_service),
     chat_unit_of_work_factory: Callable[[], SqlChatUnitOfWork] = Depends(
         get_chat_unit_of_work_factory,
     ),
@@ -99,10 +104,64 @@ async def chat(
         )
 
     assistant_message_id = assistant_message.id
-    messages = chat_service.build_messages(body.query)
+
+    try:
+        research = await research_service.prepare(body.query)
+    except ResearchPreparationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+
+    if research.insufficient_evidence:
+        assistant_content = research_service.insufficient_evidence_response(body.query)
+
+        async def insufficient_evidence_stream() -> AsyncGenerator[dict, None]:
+            yield {
+                "event": "status",
+                "data": {
+                    "state": "insufficient_evidence",
+                    "request_id": request_id,
+                    "conversation_id": str(conversation_id),
+                    "assistant_message_id": str(assistant_message_id),
+                },
+            }
+
+            yield {
+                "event": "token",
+                "data": {"content": assistant_content},
+            }
+
+            yield {
+                "event": "done",
+                "data": {
+                    "request_id": request_id,
+                    "conversation_id": str(conversation_id),
+                    "assistant_message_id": str(assistant_message_id),
+                    "finish_reason": "stop",
+                    "truncated": False,
+                    "usage": None,
+                    "partial_assistant_content": None,
+                },
+            }
+
+        async with chat_unit_of_work_factory() as persistence_unit_of_work:
+            await persistence_unit_of_work.update_message(
+                message_id=assistant_message_id,
+                content=assistant_content,
+                truncated=False,
+            )
+
+        return streaming_response(
+            insufficient_evidence_stream(),
+            request_id,
+        )
+
+    messages = research.messages
 
     async def generate() -> AsyncGenerator[dict, None]:
         content_parts: list[str] = []
+        assistant_content = ""
         truncated = False
 
         try:
@@ -116,12 +175,60 @@ async def chat(
                     content_parts.append(event["data"]["content"])
 
                 if event["event"] == "done":
+                    assistant_content = "".join(content_parts)
                     truncated = event["data"]["truncated"]
+
+                    citation_validation = research_service.validate_citations(
+                        content=assistant_content,
+                        evidence=research.evidence,
+                    )
+
+                    if citation_validation.invalid_source_ids:
+                        assistant_content = research_service.sanitize_content(
+                            content=assistant_content,
+                            validation=citation_validation,
+                        )
+
+                    yield {
+                        "event": "grounding",
+                        "data": {
+                            "cited_source_ids": (citation_validation.cited_source_ids),
+                            "invalid_source_ids": (
+                                citation_validation.invalid_source_ids
+                            ),
+                            "grounded": citation_validation.is_grounded,
+                            "sources": [
+                                {
+                                    "id": source.id,
+                                    "title": source.title,
+                                    "url": str(source.url),
+                                    "source_type": source.source_type,
+                                    "published_at": (
+                                        source.published_at.isoformat()
+                                        if source.published_at
+                                        else None
+                                    ),
+                                    "excerpt": source.excerpt,
+                                }
+                                for source in research.evidence.sources
+                            ],
+                        },
+                    }
+
+                    yield {
+                        "event": "done",
+                        "data": {
+                            **event["data"],
+                            "partial_assistant_content": (
+                                assistant_content if truncated else None
+                            ),
+                        },
+                    }
+
+                    continue
 
                 yield event
         finally:
-            assistant_content = "".join(content_parts)
-
             if assistant_content:
                 async with chat_unit_of_work_factory() as persistence_unit_of_work:
                     await persistence_unit_of_work.update_message(

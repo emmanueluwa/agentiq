@@ -316,6 +316,7 @@ async def test_truncated_stream_emits_production_sse_contract(
         "status",
         "token",
         "token",
+        "grounding",
         "done",
     ]
 
@@ -325,7 +326,7 @@ async def test_truncated_stream_emits_production_sse_contract(
     assert status_event["data"]["conversation_id"]
     assert status_event["data"]["assistant_message_id"]
 
-    token_events = events[1:-1]
+    token_events = [event for event in events[1:-1] if event["event"] == "token"]
     streamed_content = "".join(event["data"]["content"] for event in token_events)
     assert streamed_content == "Partial answer that stops abruptly."
 
