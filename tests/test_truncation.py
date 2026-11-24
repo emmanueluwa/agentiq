@@ -19,6 +19,17 @@ from agentiq.api.deps import (
 from agentiq.chat.unit_of_work import SqlChatUnitOfWork
 from agentiq.main import app
 from agentiq.services.chat_service import ChatService
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from agentiq.research.dependencies import get_research_service
+from agentiq.research.models import ResearchEvidence, SourceCandidate
+from agentiq.research.service import ResearchService
+from agentiq.research.verification import (
+    LineReview,
+    SupportingQuote,
+    VerificationReport,
+)
 
 
 @dataclass(frozen=True)
@@ -269,49 +280,99 @@ async def chat_unit_of_work() -> InMemoryChatUnitOfWork:
     return InMemoryChatUnitOfWork()
 
 
+TRACING_EXCERPT = "Distributed tracing follows a request across services."
+
+
+class FakeSearchProvider:
+    async def search(
+        self,
+        query: str,
+        *,
+        max_results: int,
+    ) -> list[SourceCandidate]:
+        return [
+            SourceCandidate(
+                id="source:1",
+                title="Distributed tracing reference",
+                url="https://example.com/distributed-tracing",
+                source_type="documentation",
+                excerpt=TRACING_EXCERPT,
+            )
+        ][:max_results]
+
+
+@pytest.fixture
+def research_service() -> ResearchService:
+    # Only these settings are used by ResearchService.prepare().
+    settings = SimpleNamespace(
+        research_max_results=3,
+        research_min_results=1,
+    )
+
+    return ResearchService(
+        search_provider=FakeSearchProvider(),
+        settings=settings,  # type: ignore[arg-type]
+    )
+
+
 @pytest_asyncio.fixture
 async def client(
     chat_unit_of_work: InMemoryChatUnitOfWork,
+    research_service: ResearchService,
 ) -> AsyncGenerator[AsyncClient, None]:
     def get_test_chat_unit_of_work_factory(
         request: Request,
     ) -> Callable[[], InMemoryChatUnitOfWork]:
         return lambda: chat_unit_of_work
 
+    def get_test_research_service() -> ResearchService:
+        return research_service
+
+    previous_overrides = app.dependency_overrides.copy()
+
     app.dependency_overrides[get_chat_unit_of_work_factory] = (
         get_test_chat_unit_of_work_factory
     )
+    app.dependency_overrides[get_research_service] = get_test_research_service
 
-    transport = ASGITransport(app=app)
+    try:
+        transport = ASGITransport(app=app)
 
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://test",
-    ) as async_client:
-        yield async_client
-
-    app.dependency_overrides.clear()
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as async_client:
+            yield async_client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
 
 
 @pytest.fixture
 def override_chat_service():
+    previous_overrides = app.dependency_overrides.copy()
+
     def _override(service: FakeChatService) -> None:
         async def get_fake_chat_service() -> ChatService:
             return service  # type: ignore[return-value]
 
         app.dependency_overrides[get_chat_service] = get_fake_chat_service
 
-    yield _override
-
-    app.dependency_overrides.clear()
+    try:
+        yield _override
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
 
 
 @pytest.mark.asyncio
-async def test_truncated_stream_emits_production_sse_contract(
+async def test_uncited_truncated_draft_is_not_released(
     client: AsyncClient,
     chat_unit_of_work: InMemoryChatUnitOfWork,
     override_chat_service,
 ) -> None:
+    from agentiq.research.delivery import UNVERIFIED_ANSWER_RESPONSE
+
     fake_service = FakeChatService(
         events=[
             FakeStreamEvent(content="Partial answer "),
@@ -335,32 +396,167 @@ async def test_truncated_stream_emits_production_sse_contract(
 
     assert [event["event"] for event in events] == [
         "status",
-        "token",
-        "token",
+        "status",
         "grounding",
+        "token",
         "done",
     ]
 
-    status_event = events[0]
-    assert status_event["data"]["state"] == "generating"
-    assert status_event["data"]["request_id"]
-    assert status_event["data"]["conversation_id"]
-    assert status_event["data"]["assistant_message_id"]
+    assert events[0]["data"]["state"] == "generating"
+    assert events[1]["data"]["state"] == "verifying"
 
-    token_events = [event for event in events[1:-1] if event["event"] == "token"]
-    streamed_content = "".join(event["data"]["content"] for event in token_events)
-    assert streamed_content == "Partial answer that stops abruptly."
+    grounding = events[2]["data"]
 
-    done_event = events[-1]
-    done_data = done_event["data"]
+    assert grounding["grounded"] is False
+    assert grounding["cited_source_ids"] == []
+    assert grounding["invalid_source_ids"] == []
+    assert grounding["sources"] == []
 
-    assert done_data["finish_reason"] == "length"
-    assert done_data["truncated"] is True
-    assert done_data["partial_assistant_content"] == (
-        "Partial answer that stops abruptly."
+    released_content = "".join(
+        event["data"]["content"] for event in events if event["event"] == "token"
     )
-    assert done_data["usage"] == {
+
+    assert released_content == UNVERIFIED_ANSWER_RESPONSE
+    assert "Partial answer" not in released_content
+    assert "that stops abruptly." not in released_content
+
+    done = events[-1]["data"]
+
+    assert done["finish_reason"] == "stop"
+    assert done["truncated"] is False
+    assert done["partial_assistant_content"] is None
+    assert done["request_id"] == response.headers["x-request-id"]
+    assert done["conversation_id"]
+    assert done["assistant_message_id"]
+
+    saved_message = chat_unit_of_work.messages[UUID(done["assistant_message_id"])]
+
+    assert saved_message.content == UNVERIFIED_ANSWER_RESPONSE
+    assert saved_message.truncated is False
+    assert saved_message.grounded is False
+    assert saved_message.cited_source_ids == []
+    assert saved_message.invalid_source_ids == []
+    assert saved_message.sources == []
+
+
+@pytest.mark.asyncio
+async def test_verified_truncated_answer_preserves_sse_and_saved_metadata(
+    client: AsyncClient,
+    chat_unit_of_work: InMemoryChatUnitOfWork,
+    override_chat_service,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer = f"{TRACING_EXCERPT} [1]"
+
+    fake_service = FakeChatService(
+        events=[
+            FakeStreamEvent(content="Distributed tracing follows a request "),
+            FakeStreamEvent(content="across services. [1]"),
+            FakeStreamEvent(finish_reason="length"),
+        ]
+    )
+
+    report = VerificationReport(
+        evidence_sufficient=True,
+        reviews=[
+            LineReview(
+                line_id=0,
+                verdict="supported",
+                explanation=("The cited excerpt directly supports the statement."),
+                supporting_quotes=[
+                    SupportingQuote(
+                        source_id="source:1",
+                        quote=TRACING_EXCERPT,
+                    )
+                ],
+            )
+        ],
+    )
+
+    verify_evidence = AsyncMock(return_value=report)
+
+    monkeypatch.setattr(
+        fake_service,
+        "verify_evidence",
+        verify_evidence,
+        raising=False,
+    )
+
+    override_chat_service(fake_service)
+
+    response = await client.post(
+        "/",
+        json={"query": "Explain distributed tracing."},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["x-request-id"]
+
+    events = parse_sse_events(response.text)
+
+    assert [event["event"] for event in events] == [
+        "status",
+        "status",
+        "grounding",
+        "token",
+        "done",
+    ]
+
+    assert events[0]["data"]["state"] == "generating"
+    assert events[1]["data"]["state"] == "verifying"
+
+    verify_evidence.assert_awaited_once()
+
+    verification_arguments = verify_evidence.await_args.kwargs
+
+    assert verification_arguments["content"] == answer
+
+    evidence = verification_arguments["evidence"]
+
+    assert isinstance(evidence, ResearchEvidence)
+    assert evidence.query == "Explain distributed tracing."
+    assert [source.id for source in evidence.sources] == ["source:1"]
+    assert evidence.sources[0].excerpt == TRACING_EXCERPT
+
+    grounding = events[2]["data"]
+
+    assert grounding["grounded"] is True
+    assert grounding["cited_source_ids"] == ["source:1"]
+    assert grounding["invalid_source_ids"] == []
+    assert [source["id"] for source in grounding["sources"]] == ["source:1"]
+
+    released_content = "".join(
+        event["data"]["content"] for event in events if event["event"] == "token"
+    )
+
+    assert released_content == answer
+
+    done = events[-1]["data"]
+
+    assert done["finish_reason"] == "length"
+    assert done["truncated"] is True
+    assert done["partial_assistant_content"] == answer
+    assert done["usage"] == {
         "completion_tokens": 12,
         "prompt_tokens": 34,
     }
-    assert done_data["request_id"] == status_event["data"]["request_id"]
+    assert done["request_id"] == response.headers["x-request-id"]
+
+    for event in (events[0], events[1], events[-1]):
+        assert event["data"]["conversation_id"] == done["conversation_id"]
+        assert event["data"]["assistant_message_id"] == done["assistant_message_id"]
+
+    saved_message = chat_unit_of_work.messages[UUID(done["assistant_message_id"])]
+
+    assert saved_message.conversation_id == UUID(done["conversation_id"])
+    assert saved_message.role == "assistant"
+    assert saved_message.content == answer
+    assert saved_message.truncated is True
+    assert saved_message.grounded is True
+    assert saved_message.cited_source_ids == ["source:1"]
+    assert saved_message.invalid_source_ids == []
+    assert len(saved_message.sources) == 1
+    assert saved_message.sources[0]["source_id"] == "source:1"
+    assert saved_message.sources[0]["source_number"] == 1
+    assert saved_message.sources[0]["excerpt"] == TRACING_EXCERPT

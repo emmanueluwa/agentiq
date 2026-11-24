@@ -9,6 +9,11 @@ from openai import APIConnectionError, APITimeoutError, APIStatusError
 from agentiq.config import Settings
 from agentiq.logging import get_logger
 from agentiq.providers.base import LLMProvider
+from agentiq.research.models import ResearchEvidence
+from agentiq.research.verification import (
+    EvidenceVerifier,
+    VerificationReport,
+)
 
 log = get_logger(__name__)
 
@@ -175,6 +180,19 @@ class ChatService:
     def __init__(self, provider: LLMProvider, settings: Settings):
         self._provider = provider
         self._settings = settings
+
+    async def verify_evidence(
+        self,
+        *,
+        content: str,
+        evidence: ResearchEvidence,
+    ) -> VerificationReport:
+        verifier = EvidenceVerifier(self._provider)
+
+        return await verifier.verify(
+            content=content,
+            evidence=evidence,
+        )
 
     def build_messages(self, query: str) -> list[dict]:
         return [

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from collections.abc import AsyncGenerator, Callable
 from uuid import UUID
 
@@ -21,6 +20,14 @@ from agentiq.plans.repository import (
     PlanNotFoundError,
 )
 from agentiq.plans.unit_of_work import SqlPlanUnitOfWork
+from agentiq.research.delivery import deliver_grounded_answer
+from agentiq.research.dependencies import get_research_service
+from agentiq.research.models import (
+    ResearchEvidence,
+    ResearchPreparationError,
+    SourceCandidate,
+)
+from agentiq.research.service import ResearchService
 from agentiq.schemas import (
     ChatConversationResponse,
     ChatMessageResponse,
@@ -36,10 +43,6 @@ from agentiq.schemas import (
 )
 from agentiq.services.chat_service import ChatService, PlanDraftGenerationError
 
-from agentiq.research.dependencies import get_research_service
-from agentiq.research.models import ResearchPreparationError
-from agentiq.research.service import ResearchService
-
 router = APIRouter()
 
 
@@ -51,7 +54,7 @@ def streaming_response(
     events: AsyncGenerator[dict, None],
     request_id: str,
 ) -> StreamingResponse:
-    async def generate():
+    async def generate() -> AsyncGenerator[str, None]:
         async for event in events:
             yield sse_event(event["event"], event["data"])
 
@@ -104,7 +107,7 @@ async def chat(
             content="",
         )
 
-    assistant_message_id = assistant_message.id
+        assistant_message_id = assistant_message.id
 
     try:
         research = await research_service.prepare(body.query)
@@ -115,7 +118,20 @@ async def chat(
         ) from error
 
     if research.insufficient_evidence:
-        assistant_content = research_service.insufficient_evidence_response(body.query)
+        assistant_content = research_service.insufficient_evidence_response(
+            body.query,
+        )
+
+        async with chat_unit_of_work_factory() as persistence_unit_of_work:
+            await persistence_unit_of_work.update_message(
+                message_id=assistant_message_id,
+                content=assistant_content,
+                truncated=False,
+                cited_source_ids=[],
+                invalid_source_ids=[],
+                grounded=False,
+                sources=[],
+            )
 
         async def insufficient_evidence_stream() -> AsyncGenerator[dict, None]:
             yield {
@@ -125,6 +141,16 @@ async def chat(
                     "request_id": request_id,
                     "conversation_id": str(conversation_id),
                     "assistant_message_id": str(assistant_message_id),
+                },
+            }
+
+            yield {
+                "event": "grounding",
+                "data": {
+                    "cited_source_ids": [],
+                    "invalid_source_ids": [],
+                    "grounded": False,
+                    "sources": [],
                 },
             }
 
@@ -146,136 +172,30 @@ async def chat(
                 },
             }
 
-        async with chat_unit_of_work_factory() as persistence_unit_of_work:
-            await persistence_unit_of_work.update_message(
-                message_id=assistant_message_id,
-                content=assistant_content,
-                truncated=False,
-                cited_source_ids=[],
-                invalid_source_ids=[],
-                grounded=False,
-                sources=[],
-            )
-
         return streaming_response(
             insufficient_evidence_stream(),
             request_id,
         )
 
-    messages = research.messages
+    if research.messages is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Research preparation did not produce generation messages.",
+        )
 
-    async def generate() -> AsyncGenerator[dict, None]:
-        content_parts: list[str] = []
-        assistant_content = ""
-        truncated = False
-
-        try:
-            async for event in chat_service.stream_response(
-                messages=messages,
-                request_id=request_id,
-                conversation_id=str(conversation_id),
-                assistant_message_id=str(assistant_message_id),
-            ):
-                if event["event"] == "token":
-                    content_parts.append(event["data"]["content"])
-
-                if event["event"] == "done":
-                    assistant_content = "".join(content_parts)
-                    truncated = event["data"]["truncated"]
-
-                    citation_validation = research_service.validate_citations(
-                        content=assistant_content,
-                        evidence=research.evidence,
-                    )
-
-                    if citation_validation.invalid_source_ids:
-                        assistant_content = research_service.sanitize_content(
-                            content=assistant_content,
-                            validation=citation_validation,
-                        )
-
-                    yield {
-                        "event": "grounding",
-                        "data": {
-                            "cited_source_ids": (citation_validation.cited_source_ids),
-                            "invalid_source_ids": (
-                                citation_validation.invalid_source_ids
-                            ),
-                            "grounded": citation_validation.is_grounded,
-                            "sources": [
-                                {
-                                    "id": source.id,
-                                    "title": source.title,
-                                    "url": str(source.url),
-                                    "source_type": source.source_type,
-                                    "published_at": (
-                                        source.published_at.isoformat()
-                                        if source.published_at
-                                        else None
-                                    ),
-                                    "excerpt": source.excerpt,
-                                }
-                                for source in research.evidence.sources
-                            ],
-                        },
-                    }
-
-                    yield {
-                        "event": "done",
-                        "data": {
-                            **event["data"],
-                            "partial_assistant_content": (
-                                assistant_content if truncated else None
-                            ),
-                        },
-                    }
-
-                    continue
-
-                yield event
-        finally:
-            if assistant_content:
-                source_payload = [
-                    {
-                        "source_number": index,
-                        "source_id": source.id,
-                        "title": source.title,
-                        "url": str(source.url),
-                        "source_type": source.source_type,
-                        "published_at": source.published_at,
-                        "excerpt": source.excerpt,
-                        "relevance": source.relevance,
-                    }
-                    for index, source in enumerate(
-                        research.evidence.sources,
-                        start=1,
-                    )
-                ]
-
-                async with chat_unit_of_work_factory() as persistence_unit_of_work:
-                    await persistence_unit_of_work.update_message(
-                        message_id=assistant_message_id,
-                        content=assistant_content,
-                        truncated=truncated,
-                        cited_source_ids=(
-                            citation_validation.cited_source_ids
-                            if "citation_validation" in locals()
-                            else []
-                        ),
-                        invalid_source_ids=(
-                            citation_validation.invalid_source_ids
-                            if "citation_validation" in locals()
-                            else []
-                        ),
-                        grounded=(
-                            citation_validation.is_grounded
-                            if "citation_validation" in locals()
-                            else False
-                        ),
-                        sources=source_payload,
-                    )
-
-    return streaming_response(generate(), request_id)
+    return streaming_response(
+        deliver_grounded_answer(
+            messages=research.messages,
+            evidence=research.evidence,
+            chat_service=chat_service,
+            research_service=research_service,
+            unit_of_work_factory=chat_unit_of_work_factory,
+            request_id=request_id,
+            conversation_id=conversation_id,
+            assistant_message_id=assistant_message_id,
+        ),
+        request_id,
+    )
 
 
 @router.post("/continue")
@@ -284,6 +204,7 @@ async def continue_chat(
     request: Request,
     request_id: str = Depends(get_request_id),
     chat_service: ChatService = Depends(get_chat_service),
+    research_service: ResearchService = Depends(get_research_service),
     chat_unit_of_work_factory: Callable[[], SqlChatUnitOfWork] = Depends(
         get_chat_unit_of_work_factory,
     ),
@@ -291,7 +212,8 @@ async def continue_chat(
     async with chat_unit_of_work_factory() as unit_of_work:
         try:
             await unit_of_work.get_conversation(body.conversation_id)
-            assistant_message = await unit_of_work.get_message(
+
+            requested_message = await unit_of_work.get_message(
                 body.assistant_message_id,
             )
         except ConversationNotFoundError as error:
@@ -300,12 +222,19 @@ async def continue_chat(
                 detail=str(error),
             ) from error
 
-        if assistant_message.conversation_id != body.conversation_id:
+        if requested_message.conversation_id != body.conversation_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Message does not belong to the conversation.",
             )
 
+        if requested_message.role != "assistant" or not requested_message.truncated:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only truncated assistant messages can be continued.",
+            )
+
+        # get_messages() eagerly loads sources in the repository.
         conversation_messages = await unit_of_work.get_messages(
             body.conversation_id,
         )
@@ -314,7 +243,7 @@ async def continue_chat(
             (
                 index
                 for index, message in enumerate(conversation_messages)
-                if message.id == assistant_message.id
+                if message.id == body.assistant_message_id
             ),
             None,
         )
@@ -324,6 +253,8 @@ async def continue_chat(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Message does not belong to the conversation.",
             )
+
+        assistant_message = conversation_messages[assistant_message_index]
 
         preceding_user_message = next(
             (
@@ -337,12 +268,58 @@ async def continue_chat(
         if preceding_user_message is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=("No user message precedes the truncated assistant message."),
+                detail="No user message precedes the truncated assistant message.",
             )
 
-        messages = chat_service.build_continuation_messages(
+        evidence = ResearchEvidence(
             query=preceding_user_message.content,
-            partial_assistant_content=assistant_message.content,
+            sources=[
+                SourceCandidate(
+                    id=source.source_id,
+                    title=source.title,
+                    url=source.url,
+                    source_type=source.source_type,
+                    published_at=source.published_at,
+                    excerpt=source.excerpt or "",
+                    relevance=source.relevance,
+                )
+                for source in assistant_message.sources
+            ],
+        )
+
+        if not evidence.sources:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This message has no saved research evidence. "
+                    "Submit the question again to generate a cited answer."
+                ),
+            )
+
+        messages = research_service.build_messages(
+            query=evidence.query,
+            evidence=evidence,
+        )
+
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": assistant_message.content,
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Continue the preceding answer without repeating it. "
+                        "Use only the supplied research excerpts for factual "
+                        "claims and preserve their original citation IDs. "
+                        "Make the continuation understandable on its own. "
+                        "Do not start with an unfinished sentence fragment. "
+                        "If the excerpts cannot support further claims, "
+                        "state that limitation rather than inventing details."
+                    ),
+                },
+            ]
         )
 
         continuation_message = await unit_of_work.append_message(
@@ -351,38 +328,21 @@ async def continue_chat(
             content="",
         )
 
-    continuation_message_id = continuation_message.id
+        continuation_message_id = continuation_message.id
 
-    async def generate() -> AsyncGenerator[dict, None]:
-        content_parts: list[str] = []
-        truncated = False
-
-        try:
-            async for event in chat_service.stream_response(
-                messages=messages,
-                request_id=request_id,
-                conversation_id=str(body.conversation_id),
-                assistant_message_id=str(continuation_message_id),
-            ):
-                if event["event"] == "token":
-                    content_parts.append(event["data"]["content"])
-
-                if event["event"] == "done":
-                    truncated = event["data"]["truncated"]
-
-                yield event
-        finally:
-            assistant_content = "".join(content_parts)
-
-            if assistant_content:
-                async with chat_unit_of_work_factory() as persistence_unit_of_work:
-                    await persistence_unit_of_work.update_message(
-                        message_id=continuation_message_id,
-                        content=assistant_content,
-                        truncated=truncated,
-                    )
-
-    return streaming_response(generate(), request_id)
+    return streaming_response(
+        deliver_grounded_answer(
+            messages=messages,
+            evidence=evidence,
+            chat_service=chat_service,
+            research_service=research_service,
+            unit_of_work_factory=chat_unit_of_work_factory,
+            request_id=request_id,
+            conversation_id=body.conversation_id,
+            assistant_message_id=continuation_message_id,
+        ),
+        request_id,
+    )
 
 
 @router.get("/conversations/{conversation_id}")
@@ -469,6 +429,7 @@ async def create_plan_draft(
     async with chat_unit_of_work_factory() as chat_unit_of_work:
         try:
             await chat_unit_of_work.get_conversation(body.conversation_id)
+
             source_message = await chat_unit_of_work.get_message(
                 body.source_message_id,
             )
@@ -484,9 +445,11 @@ async def create_plan_draft(
                 detail="Message does not belong to the conversation.",
             )
 
+        source_content = source_message.content
+
     try:
         draft = await chat_service.create_plan_draft(
-            source_message=source_message.content,
+            source_message=source_content,
         )
     except PlanDraftGenerationError as error:
         raise HTTPException(
@@ -510,6 +473,7 @@ async def create_plan(
     async with chat_unit_of_work_factory() as chat_unit_of_work:
         try:
             await chat_unit_of_work.get_conversation(body.conversation_id)
+
             source_message = await chat_unit_of_work.get_message(
                 body.source_message_id,
             )
@@ -593,14 +557,14 @@ async def update_plan_item(
                 detail=str(error),
             ) from error
 
-    return PlanItemResponse(
-        id=item.id,
-        title=item.title,
-        details=item.details,
-        status=item.status,
-        position=item.position,
-        due_at=item.due_at,
-    )
+        return PlanItemResponse(
+            id=item.id,
+            title=item.title,
+            details=item.details,
+            status=item.status,
+            position=item.position,
+            due_at=item.due_at,
+        )
 
 
 @router.delete("/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -618,36 +582,3 @@ async def delete_plan(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=str(error),
             ) from error
-
-
-@router.post("/plans/drafts")
-async def create_plan_draft(
-    body: PlanDraftRequest,
-    chat_service: ChatService = Depends(get_chat_service),
-    chat_unit_of_work_factory: Callable[[], SqlChatUnitOfWork] = Depends(
-        get_chat_unit_of_work_factory,
-    ),
-) -> PlanDraftResponse:
-    async with chat_unit_of_work_factory() as chat_unit_of_work:
-        try:
-            await chat_unit_of_work.get_conversation(body.conversation_id)
-            source_message = await chat_unit_of_work.get_message(
-                body.source_message_id,
-            )
-        except ConversationNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=str(error),
-            ) from error
-
-        if source_message.conversation_id != body.conversation_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Message does not belong to the conversation.",
-            )
-
-    draft = await chat_service.create_plan_draft(
-        source_message=source_message.content,
-    )
-
-    return draft
