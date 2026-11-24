@@ -45,11 +45,19 @@ class SqlChatUnitOfWork:
         *,
         content: str,
         truncated: bool,
+        cited_source_ids: list[str] | None = None,
+        invalid_source_ids: list[str] | None = None,
+        grounded: bool | None = None,
+        sources: list[dict] | None = None,
     ) -> ChatMessageRecord:
         return await self._repository.update_message(
             message_id=message_id,
             content=content,
             truncated=truncated,
+            cited_source_ids=cited_source_ids,
+            invalid_source_ids=invalid_source_ids,
+            grounded=grounded,
+            sources=sources,
         )
 
     async def get_messages(self, conversation_id: UUID) -> list[ChatMessageRecord]:

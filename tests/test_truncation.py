@@ -38,6 +38,10 @@ class InMemoryChatMessage:
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc),
     )
+    cited_source_ids: list[str] = field(default_factory=list)
+    invalid_source_ids: list[str] = field(default_factory=list)
+    grounded: bool | None = None
+    sources: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -98,6 +102,10 @@ class InMemoryChatUnitOfWork:
         *,
         content: str,
         truncated: bool,
+        cited_source_ids: list[str] | None = None,
+        invalid_source_ids: list[str] | None = None,
+        grounded: bool | None = None,
+        sources: list[dict] | None = None,
     ) -> InMemoryChatMessage:
         if message_id not in self.messages:
             raise KeyError(f"Chat message not found: {message_id}")
@@ -105,6 +113,19 @@ class InMemoryChatUnitOfWork:
         message = self.messages[message_id]
         message.content = content
         message.truncated = truncated
+
+        if cited_source_ids is not None:
+            message.cited_source_ids = cited_source_ids
+
+        if invalid_source_ids is not None:
+            message.invalid_source_ids = invalid_source_ids
+
+        if grounded is not None:
+            message.grounded = grounded
+
+        if sources is not None:
+            message.sources = sources
+
         return message
 
     async def get_messages(

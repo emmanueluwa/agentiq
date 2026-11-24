@@ -171,7 +171,7 @@ class ResearchService:
     ) -> list[dict]:
         source_blocks: list[str] = []
 
-        for index, source in enumerate(evidence.sources, start=1):
+        for source in evidence.sources:
             published = (
                 source.published_at.date().isoformat()
                 if source.published_at
@@ -179,7 +179,7 @@ class ResearchService:
             )
 
             source_blocks.append(
-                f"[source:{index}]\n"
+                f"[{source.id}]\n"
                 f"Title: {source.title}\n"
                 f"URL: {source.url}\n"
                 f"Type: {source.source_type}\n"

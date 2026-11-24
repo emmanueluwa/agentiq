@@ -32,6 +32,7 @@ from agentiq.schemas import (
     PlanItemUpdate,
     PlanResponse,
     QueryRequest,
+    ResearchSourceResponse,
 )
 from agentiq.services.chat_service import ChatService, PlanDraftGenerationError
 
@@ -150,6 +151,10 @@ async def chat(
                 message_id=assistant_message_id,
                 content=assistant_content,
                 truncated=False,
+                cited_source_ids=[],
+                invalid_source_ids=[],
+                grounded=False,
+                sources=[],
             )
 
         return streaming_response(
@@ -230,11 +235,44 @@ async def chat(
                 yield event
         finally:
             if assistant_content:
+                source_payload = [
+                    {
+                        "source_number": index,
+                        "source_id": source.id,
+                        "title": source.title,
+                        "url": str(source.url),
+                        "source_type": source.source_type,
+                        "published_at": source.published_at,
+                        "excerpt": source.excerpt,
+                        "relevance": source.relevance,
+                    }
+                    for index, source in enumerate(
+                        research.evidence.sources,
+                        start=1,
+                    )
+                ]
+
                 async with chat_unit_of_work_factory() as persistence_unit_of_work:
                     await persistence_unit_of_work.update_message(
                         message_id=assistant_message_id,
                         content=assistant_content,
                         truncated=truncated,
+                        cited_source_ids=(
+                            citation_validation.cited_source_ids
+                            if "citation_validation" in locals()
+                            else []
+                        ),
+                        invalid_source_ids=(
+                            citation_validation.invalid_source_ids
+                            if "citation_validation" in locals()
+                            else []
+                        ),
+                        grounded=(
+                            citation_validation.is_grounded
+                            if "citation_validation" in locals()
+                            else False
+                        ),
+                        sources=source_payload,
                     )
 
     return streaming_response(generate(), request_id)
@@ -363,19 +401,39 @@ async def get_conversation(
                 detail=str(error),
             ) from error
 
-    return ChatConversationResponse(
-        id=conversation_id,
-        messages=[
-            ChatMessageResponse(
-                id=message.id,
-                role=message.role,
-                content=message.content,
-                truncated=message.truncated,
-                created_at=message.created_at.isoformat(),
-            )
-            for message in messages
-        ],
-    )
+        return ChatConversationResponse(
+            id=conversation_id,
+            messages=[
+                ChatMessageResponse(
+                    id=message.id,
+                    role=message.role,
+                    content=message.content,
+                    truncated=message.truncated,
+                    created_at=message.created_at.isoformat(),
+                    cited_source_ids=message.cited_source_ids,
+                    invalid_source_ids=message.invalid_source_ids,
+                    grounded=message.grounded,
+                    sources=[
+                        ResearchSourceResponse(
+                            id=source.source_id,
+                            source_number=source.source_number,
+                            title=source.title,
+                            url=source.url,
+                            source_type=source.source_type,
+                            published_at=(
+                                source.published_at.isoformat()
+                                if source.published_at
+                                else None
+                            ),
+                            excerpt=source.excerpt,
+                            relevance=source.relevance,
+                        )
+                        for source in message.sources
+                    ],
+                )
+                for message in messages
+            ],
+        )
 
 
 def serialize_plan(plan: object) -> PlanResponse:

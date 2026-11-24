@@ -15,12 +15,27 @@ class ContinueRequest(BaseModel):
     assistant_message_id: UUID
 
 
+class ResearchSourceResponse(BaseModel):
+    id: str
+    source_number: int
+    title: str
+    url: str
+    source_type: str
+    published_at: str | None
+    excerpt: str
+    relevance: float | None
+
+
 class ChatMessageResponse(BaseModel):
     id: UUID
     role: str
     content: str
     truncated: bool
     created_at: str
+    cited_source_ids: list[str] = []
+    invalid_source_ids: list[str] = []
+    grounded: bool | None = None
+    sources: list[ResearchSourceResponse] = []
 
 
 class ChatConversationResponse(BaseModel):

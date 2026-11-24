@@ -4,10 +4,16 @@ import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 
+from sqlalchemy import delete, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agentiq.chat.sql_models import ChatMessageRecord, ConversationRecord
+from agentiq.chat.sql_models import (
+    ChatMessageRecord,
+    ConversationRecord,
+    ChatMessageSourceRecord,
+)
 
 
 class ConversationNotFoundError(Exception):
@@ -87,6 +93,10 @@ class ChatRepository:
         *,
         content: str,
         truncated: bool,
+        cited_source_ids: list[str] | None = None,
+        invalid_source_ids: list[str] | None = None,
+        grounded: bool | None = None,
+        sources: list[dict] | None = None,
     ) -> ChatMessageRecord:
         message = await self._session.get(ChatMessageRecord, message_id)
 
@@ -95,6 +105,41 @@ class ChatRepository:
 
         message.content = content
         message.truncated = truncated
+
+        if cited_source_ids is not None:
+            message.cited_source_ids = cited_source_ids
+
+        if invalid_source_ids is not None:
+            message.invalid_source_ids = invalid_source_ids
+
+        if grounded is not None:
+            message.grounded = grounded
+
+        if sources is not None:
+            await self._session.execute(
+                delete(ChatMessageSourceRecord).where(
+                    ChatMessageSourceRecord.message_id == message.id,
+                )
+            )
+
+            if sources:
+                self._session.add_all(
+                    [
+                        ChatMessageSourceRecord(
+                            id=uuid.uuid4(),
+                            message_id=message.id,
+                            source_number=source["source_number"],
+                            source_id=source["source_id"],
+                            title=source["title"],
+                            url=source["url"],
+                            source_type=source["source_type"],
+                            published_at=source.get("published_at"),
+                            excerpt=source.get("excerpt", ""),
+                            relevance=source.get("relevance"),
+                        )
+                        for source in sources
+                    ]
+                )
 
         conversation = await self.get_conversation(message.conversation_id)
         conversation.updated_at = datetime.now(timezone.utc)
@@ -112,6 +157,7 @@ class ChatRepository:
         result = await self._session.execute(
             select(ChatMessageRecord)
             .where(ChatMessageRecord.conversation_id == conversation_id)
+            .options(selectinload(ChatMessageRecord.sources))
             .order_by(ChatMessageRecord.created_at)
         )
 

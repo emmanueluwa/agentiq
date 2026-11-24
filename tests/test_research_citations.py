@@ -73,3 +73,44 @@ def test_missing_citation_is_not_grounded() -> None:
 
     assert not validation.is_grounded
     assert validation.cited_source_ids == []
+
+
+def test_prompt_preserves_non_contiguous_source_ids() -> None:
+    service = make_service()
+
+    evidence = ResearchEvidence(
+        query="What does the evidence say?",
+        sources=[
+            SourceCandidate(
+                id="source:1",
+                title="First source",
+                url="https://example.com/first",
+                excerpt="The first supporting excerpt.",
+            ),
+            SourceCandidate(
+                id="source:3",
+                title="Third source",
+                url="https://example.com/third",
+                excerpt="The third supporting excerpt.",
+            ),
+        ],
+    )
+
+    messages = service.build_messages(
+        query=evidence.query,
+        evidence=evidence,
+    )
+
+    prompt = messages[-1]["content"]
+
+    assert "[source:1]\nTitle: First source" in prompt
+    assert "[source:3]\nTitle: Third source" in prompt
+    assert "[source:2]" not in prompt
+
+    validation = service.validate_citations(
+        content="The third supporting excerpt. [3]",
+        evidence=evidence,
+    )
+
+    assert validation.cited_source_ids == ["source:3"]
+    assert validation.invalid_source_ids == []
