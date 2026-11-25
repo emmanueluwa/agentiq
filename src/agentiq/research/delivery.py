@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable
 from uuid import UUID
 
+import traceback
+
 from agentiq.chat.unit_of_work import SqlChatUnitOfWork
 from agentiq.logging import get_logger
 from agentiq.research.draft import DraftGenerationError, collect_draft
@@ -10,6 +12,7 @@ from agentiq.research.models import ResearchEvidence
 from agentiq.research.service import ResearchService
 from agentiq.research.verification import VerificationError
 from agentiq.services.chat_service import ChatService
+from agentiq.research.verification import apply_verified_citations
 
 log = get_logger(__name__)
 
@@ -105,9 +108,22 @@ async def deliver_grounded_answer(
                 content=draft.content,
                 evidence=evidence,
             )
-            accepted = report.accepted
-        except VerificationError:
-            log.exception("answer_verification_failed", **identifiers)
+            if report.accepted:
+                content = apply_verified_citations(draft.content, report)
+
+                accepted = report.accepted
+        except VerificationError as error:
+            cause = error.__cause__
+
+            log.error(
+                "answer_verification_failed",
+                **identifiers,
+                error_type=type(error).__name__,
+                error_message=str(error),
+                cause_type=type(cause).__name__ if cause else None,
+                cause_message=str(cause) if cause else None,
+                traceback=traceback.format_exc(),
+            )
 
             yield {
                 "event": "error",

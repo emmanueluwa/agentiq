@@ -189,3 +189,5 @@ yarn-error.log*
 *.orig
 .hypothesis/
 commands.txt
+
+.local/verification-captures/
