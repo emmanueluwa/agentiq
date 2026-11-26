@@ -100,9 +100,11 @@ Return exactly one JSON object:
 Rules:
 - Review every draft line exactly once, in its original order.
 - Allowed verdicts are supported, unsupported, and non_factual.
-- A supported line must have citations for every factual claim, including
-  synthesis, conclusion, consistency, and summary claims.
-- Every factual claim must follow from the cited sources' supplied passages.
+- Judge each line by whether its factual claims follow from the supplied
+  passages, not by whether it cites every source or uses every source.
+- A line does not need to use all supplied sources.
+- A supported line must select every passage that directly supports its
+  factual claims.
 - Check numbers, dates, qualifiers, comparisons, causality, and scope.
 - Citation markers alone do not prove support.
 - Select existing passage IDs only. Never write or reconstruct quotations.
@@ -110,19 +112,24 @@ Rules:
 - Select only passages that directly support the factual claims on that line.
 - Do not select passages merely because they provide related context.
 - Do not use a line to certify, summarize, or validate other lines.
-- A synthesis, conclusion, consistency, or summary claim is factual and must
-  be supported by selected passages.
-- If a line cannot be supported by supplied passages, mark it unsupported.
-- If any claim or cited source lacks support, mark the line unsupported.
+- If a factual claim cannot be supported by supplied passages, mark the line
+  unsupported.
+- If any factual claim or cited source lacks support, mark the line unsupported.
 - A statement that is plausible or familiar is not supported unless the
   supplied passages support it.
 - For unsupported or non_factual lines, supporting_passage_ids must be [].
-- Use non_factual only for headings, questions, explicit uncertainty, or
-  clearly labelled suggestions that contain no factual premises.
+- Use non_factual for headings, questions, explicit uncertainty, clearly
+  labelled suggestions, transitions, and statements about the answer itself.
+- Statements such as “These definitions are drawn from the cited sources”,
+  “According to the provided excerpts”, “The cited sources confirm”, or
+  “This answer is based on” are non_factual, not unsupported factual claims.
 - Recommendations containing factual premises must have those premises
   checked; do not classify them as non_factual to avoid verification.
-- Set evidence_sufficient to false if the evidence cannot substantively
-  answer the question, or the draft conceals material evidence conflicts.
+- Set evidence_sufficient to false only when the supplied evidence cannot
+  substantively answer the question, or the draft conceals a material
+  evidence conflict.
+- Do not set evidence_sufficient to false merely because the draft did not
+  use every source or contains non_factual lines.
 - Return JSON only, without Markdown or code fences.
 """.strip()
 

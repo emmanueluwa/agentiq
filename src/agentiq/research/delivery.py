@@ -16,11 +16,16 @@ from agentiq.research.verification import apply_verified_citations
 
 log = get_logger(__name__)
 
-UNVERIFIED_ANSWER_RESPONSE = (
+INSUFFICIENT_EVIDENCE_RESPONSE = (
     "I don’t have enough verified evidence to answer this confidently. "
-    "I could not substantiate the generated answer against the retrieved "
-    "source excerpts, so I have not presented it. "
-    "Please narrow the question or provide additional reliable sources."
+    "The retrieved sources do not sufficiently answer the question. "
+    "Please refine the question or ask about a more specific aspect of the topic."
+)
+
+UNVERIFIED_ANSWER_RESPONSE = (
+    "I can’t provide a verified answer to this question right now because "
+    "part of the generated response could not be substantiated by the "
+    "retrieved evidence. Please try again or narrow the question."
 )
 
 
@@ -101,6 +106,7 @@ async def deliver_grounded_answer(
     )
 
     accepted = False
+    evidence_sufficient = True
 
     if citations.has_citations and not citations.invalid_source_ids:
         try:
@@ -108,6 +114,8 @@ async def deliver_grounded_answer(
                 content=draft.content,
                 evidence=evidence,
             )
+
+            evidence_sufficient = report.evidence_sufficient
 
             if not report.accepted:
                 log.warning(
@@ -157,7 +165,12 @@ async def deliver_grounded_answer(
             }
             return
 
-    content = draft.content if accepted else UNVERIFIED_ANSWER_RESPONSE
+    if accepted:
+        content = draft.content
+    elif not evidence_sufficient:
+        content = INSUFFICIENT_EVIDENCE_RESPONSE
+    else:
+        content = UNVERIFIED_ANSWER_RESPONSE
     truncated = draft.truncated if accepted else False
     cited_source_ids = citations.cited_source_ids if accepted else []
 
