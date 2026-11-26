@@ -108,6 +108,25 @@ async def deliver_grounded_answer(
                 content=draft.content,
                 evidence=evidence,
             )
+
+            if not report.accepted:
+                log.warning(
+                    "answer_rejected_by_verifier",
+                    **identifiers,
+                    evidence_sufficient=report.evidence_sufficient,
+                    reviews=[
+                        {
+                            "line_id": review.line_id,
+                            "verdict": review.verdict,
+                            "explanation": review.explanation,
+                            "supporting_source_ids": sorted(
+                                {quote.source_id for quote in review.supporting_quotes}
+                            ),
+                        }
+                        for review in report.reviews
+                    ],
+                )
+
             if report.accepted:
                 content = apply_verified_citations(draft.content, report)
 

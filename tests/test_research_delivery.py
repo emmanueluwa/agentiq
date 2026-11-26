@@ -34,11 +34,34 @@ class FakeChatService:
             },
         }
 
-    async def verify_evidence(self, **kwargs):
+    async def verify_evidence(self, *, content, evidence):
         if self.verification_error:
-            raise VerificationError("Test verification failure")
+            raise VerificationError("Verification failed.")
 
-        return SimpleNamespace(accepted=self.accepted)
+        if self.accepted:
+            return SimpleNamespace(
+                accepted=True,
+                evidence_sufficient=True,
+                reviews=[
+                    SimpleNamespace(
+                        line_id=0,
+                        verdict="supported",
+                        explanation="Supported by the supplied evidence.",
+                        supporting_quotes=[
+                            SimpleNamespace(
+                                source_id="source:1",
+                                quotation="Rust is a systems programming language.",
+                            )
+                        ],
+                    )
+                ],
+            )
+
+        return SimpleNamespace(
+            accepted=False,
+            evidence_sufficient=True,
+            reviews=[],
+        )
 
 
 class FakeResearchService:

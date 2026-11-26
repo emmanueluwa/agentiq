@@ -213,7 +213,12 @@ class ResearchService:
                     "evidence to answer this confidently.”\n"
                     "- Do not present an unsupported recommendation as fact.\n"
                     "- Clearly distinguish facts, inferences, and actions that "
-                    "still require verification."
+                    "still require verification.\n"
+                    "- Do not include statements about the answer itself, such as "
+                    "“These definitions are drawn from…”, “According to the "
+                    "provided excerpts…”, “The cited sources confirm…”, or "
+                    "“This answer is based on…”.\n"
+                    "- State the technical facts directly and cite them."
                 ),
             },
         ]
